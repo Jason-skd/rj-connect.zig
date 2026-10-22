@@ -56,6 +56,7 @@ const MessageKind = enum {
     handshake,
     smp_hello,
     user_info,
+    sam_heartbeat,
 };
 
 const SmpInitialization = struct {
@@ -80,6 +81,8 @@ pub const Machine = struct {
     outbound: ?Outbound = null,
     ack_deadline: ?std.Io.Timestamp = null,
     result_deadline: ?std.Io.Timestamp = null,
+    heartbeat_deadline: ?std.Io.Timestamp = null,
+    reauth_deadline: ?std.Io.Timestamp = null,
     smp_initialization: ?SmpInitialization = null,
     reassembler: reassembly.Reassembler,
     received_payload: ?[]u8 = null,
@@ -136,6 +139,8 @@ pub const Machine = struct {
             minimumDeadline(self.ack_deadline, self.reassembler.nextDeadline()),
             self.result_deadline,
         );
+        deadline = minimumDeadline(deadline, self.heartbeat_deadline);
+        deadline = minimumDeadline(deadline, self.reauth_deadline);
         if (self.smp_initialization) |state| {
             deadline = minimumDeadline(deadline, state.initialization_deadline);
             deadline = minimumDeadline(deadline, state.response_deadline);
@@ -146,24 +151,7 @@ pub const Machine = struct {
 
     pub fn start(self: *Machine, now: std.Io.Timestamp) Error!Outcome {
         return switch (self.config.mode) {
-            .sam => |handshake| blk: {
-                const payload = try self.allocator.alloc(
-                    u8,
-                    sam.handshakeSize(
-                        self.config.username_gbk.len,
-                        handshake.session_parameter.len,
-                        handshake.endpoint_parameter.len,
-                    ),
-                );
-                defer self.allocator.free(payload);
-                _ = sam.encodeHandshake(
-                    self.config.username_gbk,
-                    handshake.session_parameter,
-                    handshake.endpoint_parameter,
-                    payload,
-                ) catch return error.InvalidConfig;
-                break :blk self.beginPayload(payload, .handshake, now);
-            },
+            .sam => self.beginSamHandshake(.handshake, now),
             .smp => |smp_config| blk: {
                 const send_immediately = smp_config.initial_request_delay.toNanoseconds() == 0;
                 self.smp_initialization = .{
@@ -273,6 +261,33 @@ pub const Machine = struct {
             payload,
         ) catch return error.InvalidConfig;
         return self.beginPayload(payload, .smp_hello, now);
+    }
+
+    fn beginSamHandshake(
+        self: *Machine,
+        kind: MessageKind,
+        now: std.Io.Timestamp,
+    ) Error!Outcome {
+        const handshake = switch (self.config.mode) {
+            .sam => |value| value,
+            .smp => return error.InvalidState,
+        };
+        const payload = try self.allocator.alloc(
+            u8,
+            sam.handshakeSize(
+                self.config.username_gbk.len,
+                handshake.session_parameter.len,
+                handshake.endpoint_parameter.len,
+            ),
+        );
+        defer self.allocator.free(payload);
+        _ = sam.encodeHandshake(
+            self.config.username_gbk,
+            handshake.session_parameter,
+            handshake.endpoint_parameter,
+            payload,
+        ) catch return error.InvalidConfig;
+        return self.beginPayload(payload, kind, now);
     }
 
     fn emptyInitializingOutcome(self: *Machine) Error!Outcome {
@@ -401,6 +416,25 @@ pub const Machine = struct {
                         .actions = actions,
                         .previous_phase = .{ .direct = .initializing },
                         .phase = .{ .direct = .initializing },
+                        .next_deadline = self.nextDeadline(),
+                        .failure = null,
+                        .generation = self.generation,
+                    };
+                },
+                .sam_heartbeat => {
+                    const actions = try self.allocator.alloc(Action, 0);
+                    errdefer self.allocator.free(actions);
+                    self.allocator.free(outbound.encrypted);
+                    self.outbound = null;
+                    self.ack_deadline = null;
+                    self.heartbeat_deadline = if (self.config.heartbeat_interval.toNanoseconds() > 0)
+                        try time.addDuration(now, self.config.heartbeat_interval)
+                    else
+                        null;
+                    return .{
+                        .actions = actions,
+                        .previous_phase = .{ .direct = .active },
+                        .phase = .{ .direct = .active },
                         .next_deadline = self.nextDeadline(),
                         .failure = null,
                         .generation = self.generation,
@@ -591,6 +625,7 @@ pub const Machine = struct {
                             actions,
                             result,
                             timestamp_update.state,
+                            now,
                         ) catch |err| {
                             return err;
                         };
@@ -643,6 +678,7 @@ pub const Machine = struct {
         actions: []Action,
         result: sam.DhcpAuthResult,
         timestamps: TimestampState,
+        now: std.Io.Timestamp,
     ) Error!Outcome {
         const message = if (result.message_gbk.len == 0)
             null
@@ -665,6 +701,14 @@ pub const Machine = struct {
         self.timestamps = timestamps;
         self.result_deadline = null;
         if (result.success) {
+            self.heartbeat_deadline = if (self.config.heartbeat_interval.toNanoseconds() > 0)
+                try time.addDuration(now, self.config.heartbeat_interval)
+            else
+                null;
+            self.reauth_deadline = if (self.config.reauth_interval.toNanoseconds() > 0)
+                try time.addDuration(now, self.config.reauth_interval)
+            else
+                null;
             self.phase = .active;
             return .{
                 .actions = combined,
@@ -702,6 +746,7 @@ pub const Machine = struct {
 
     fn handleTimer(self: *Machine, now: std.Io.Timestamp) Error!Outcome {
         if (try self.handleSmpTimer(now)) |outcome| return outcome;
+        if (try self.handleActiveTimer(now)) |outcome| return outcome;
         const reassembly_deadline = self.reassembler.nextDeadline();
         const reassembly_expired = self.reassembler.expire(now);
         const result_deadline = self.result_deadline;
@@ -771,6 +816,47 @@ pub const Machine = struct {
             .previous_phase = .{ .direct = self.phase },
             .phase = .{ .direct = self.phase },
             .next_deadline = self.nextDeadline(),
+            .failure = null,
+            .generation = self.generation,
+        };
+    }
+
+    fn handleActiveTimer(self: *Machine, now: std.Io.Timestamp) Error!?Outcome {
+        if (self.phase != .active) return null;
+        if (self.reauth_deadline) |deadline| {
+            if (!now.compare(.lt, deadline)) return try self.reauthRequired();
+        }
+        if (self.heartbeat_deadline) |deadline| {
+            if (!now.compare(.lt, deadline) and self.outbound == null) {
+                switch (self.config.mode) {
+                    .sam => {
+                        const previous = self.heartbeat_deadline;
+                        self.heartbeat_deadline = null;
+                        var outcome = self.beginSamHandshake(.sam_heartbeat, now) catch |err| {
+                            self.heartbeat_deadline = previous;
+                            return err;
+                        };
+                        outcome.next_deadline = self.nextDeadline();
+                        return outcome;
+                    },
+                    .smp => {},
+                }
+            }
+        }
+        return null;
+    }
+
+    fn reauthRequired(self: *Machine) Error!Outcome {
+        const actions = try self.allocator.alloc(Action, 1);
+        errdefer self.allocator.free(actions);
+        actions[0] = .reauth_required;
+        self.heartbeat_deadline = null;
+        self.reauth_deadline = null;
+        return .{
+            .actions = actions,
+            .previous_phase = .{ .direct = .active },
+            .phase = .idle,
+            .next_deadline = null,
             .failure = null,
             .generation = self.generation,
         };
@@ -1508,6 +1594,48 @@ test "Direct honors a delayed first SMP hello" {
     try std.testing.expectEqual(@as(usize, 1), hello.actions.len);
 }
 
+test "Direct sends SAM heartbeats and terminates on reauthentication" {
+    var config = testConfig();
+    config.heartbeat_interval = .fromSeconds(5);
+    config.reauth_interval = .fromSeconds(20);
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+    try enterActiveSam(&machine, config);
+
+    try std.testing.expectEqual(
+        testTimestamp(5 * std.time.ns_per_s),
+        machine.nextDeadline().?,
+    );
+    var heartbeat = try machine.step(
+        testTimestamp(5 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    try std.testing.expectEqual(@as(usize, 1), heartbeat.actions.len);
+    const heartbeat_frame = try wire.decodeFrame(heartbeat.actions[0].send_frame);
+    try std.testing.expectEqual(@as(u8, 1), heartbeat_frame.header.code);
+    try acknowledgeCurrentFrame(&machine, config, heartbeat.actions[0].send_frame, 5);
+    heartbeat.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        testTimestamp(10 * std.time.ns_per_s),
+        machine.nextDeadline().?,
+    );
+
+    var next_heartbeat = try machine.step(
+        testTimestamp(10 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    try std.testing.expectEqual(@as(usize, 1), next_heartbeat.actions.len);
+    next_heartbeat.deinit(std.testing.allocator);
+
+    var reauth = try machine.step(
+        testTimestamp(20 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    defer reauth.deinit(std.testing.allocator);
+    try std.testing.expectEqual(types.ActivePhase.idle, reauth.phase);
+    try std.testing.expectEqual(Action.reauth_required, reauth.actions[0]);
+}
+
 fn testConfig() types.DirectSessionConfig {
     return .{
         .mode = .{ .sam = .{
@@ -1663,6 +1791,39 @@ fn enterAwaitingResult(
     awaiting.deinit(std.testing.allocator);
     try std.testing.expectEqual(
         types.ActivePhase{ .direct = .awaiting_result },
+        machine.currentPhase(),
+    );
+}
+
+fn enterActiveSam(
+    machine: *Machine,
+    config: types.DirectSessionConfig,
+) !void {
+    try enterAwaitingResult(machine, config);
+
+    var payload: [16]u8 = @splat(0);
+    payload[0..13].* = .{
+        1,    1,   12,
+        0x09, 8,   0x02,
+        2,    'o', 'k',
+        0x13, 1,   1,
+        0,
+    };
+    var encrypted: [16]u8 = undefined;
+    _ = try des.encryptCbc(config.des_key, config.initial_iv, &payload, &encrypted);
+    var result = try sendDataAtForTest(
+        machine,
+        config,
+        60,
+        1,
+        encrypted.len,
+        100,
+        &encrypted,
+        testTimestamp(0),
+    );
+    result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        types.ActivePhase{ .direct = .active },
         machine.currentPhase(),
     );
 }

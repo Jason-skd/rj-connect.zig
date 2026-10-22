@@ -1,6 +1,7 @@
 //! Public deterministic session coordinator.
 
 const std = @import("std");
+const eapol = @import("../protocol/eapol.zig");
 const context = @import("context.zig");
 const direct_machine = @import("direct.zig");
 const eap_md5 = @import("eap_md5.zig");
@@ -37,6 +38,7 @@ pub const Session = struct {
     config: Config,
     context: context.Context,
     failure_reason: ?FailureReason,
+    eap_peer_mac: ?[6]u8,
     machine: Machine,
 
     const Machine = union(enum) {
@@ -62,6 +64,7 @@ pub const Session = struct {
             .config = config,
             .context = .{},
             .failure_reason = null,
+            .eap_peer_mac = null,
             .machine = .empty,
         };
     }
@@ -119,6 +122,7 @@ pub const Session = struct {
 
         return switch (input) {
             .start => self.start(now),
+            .cancel => self.cancel(now),
             .direct_session => |config| self.startDirect(now, config),
             else => self.stepActive(now, input),
         };
@@ -139,6 +143,7 @@ pub const Session = struct {
         errdefer candidate.deinit();
 
         const result = try candidate.step(now, .start);
+        self.eap_peer_mac = null;
         self.context.generation = candidate.currentGeneration();
         self.context.last_now = now;
         self.failure_reason = result.failure;
@@ -180,6 +185,21 @@ pub const Session = struct {
                 return result;
             },
             .direct => |*engine| {
+                switch (input) {
+                    .frame => |event| {
+                        if (!event.generation.eql(self.context.generation)) {
+                            return error.StaleGeneration;
+                        }
+                        if (etherType(event.bytes) == 0x888e) {
+                            const frame = eapol.decode(event.bytes) catch return self.noop();
+                            if (frame.packet_type == .logoff) {
+                                return self.finishDirect(now, false, .server_logoff);
+                            }
+                            return self.noop();
+                        }
+                    },
+                    else => {},
+                }
                 const result = try engine.step(now, input);
                 self.context.generation = engine.currentGeneration();
                 self.context.last_now = now;
@@ -214,12 +234,59 @@ pub const Session = struct {
 
         var result = try candidate.start(now);
         result.previous_phase = self.phase();
+        self.eap_peer_mac = switch (self.machine) {
+            .eap_md5 => |*engine| engine.authenticatedPeer(),
+            else => null,
+        };
         self.machine.deinit();
         self.machine = .{ .direct = candidate };
         self.context.generation = generation;
         self.context.last_now = now;
         self.failure_reason = null;
         return result;
+    }
+
+    fn cancel(self: *Session, now: std.Io.Timestamp) Error!Outcome {
+        return switch (self.machine) {
+            .empty => error.InvalidState,
+            .eap_md5 => self.stepActive(now, .cancel),
+            .direct => self.finishDirect(now, true, .canceled),
+        };
+    }
+
+    fn finishDirect(
+        self: *Session,
+        now: std.Io.Timestamp,
+        send_logoff: bool,
+        reason: FailureReason,
+    ) Error!Outcome {
+        const previous_phase = self.phase();
+        const action_count: usize = if (send_logoff) 1 else 0;
+        const actions = try self.allocator.alloc(Action, action_count);
+        errdefer self.allocator.free(actions);
+        if (send_logoff) {
+            const destination = self.eap_peer_mac orelse self.config.destination_mac;
+            const frame = try self.allocator.alloc(u8, eapol.header_size);
+            errdefer self.allocator.free(frame);
+            eapol.encodeLogoff(
+                destination,
+                self.config.source_mac,
+                frame[0..eapol.header_size],
+            );
+            actions[0] = .{ .send_frame = frame };
+        }
+        self.machine.deinit();
+        self.machine = .empty;
+        self.context.last_now = now;
+        self.failure_reason = reason;
+        return .{
+            .actions = actions,
+            .previous_phase = previous_phase,
+            .phase = .idle,
+            .next_deadline = null,
+            .failure = reason,
+            .generation = self.context.generation,
+        };
     }
 
     fn noop(self: *const Session) Error!Outcome {

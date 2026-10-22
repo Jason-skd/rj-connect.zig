@@ -153,6 +153,13 @@ pub const Engine = struct {
         return self.last_now;
     }
 
+    pub fn authenticatedPeer(self: *const Engine) ?[6]u8 {
+        return switch (self.state) {
+            .authenticated => |state| state.peer_mac,
+            else => null,
+        };
+    }
+
     /// Accepts one external event and commits state only after every returned action is allocated.
     pub fn step(self: *Engine, now: std.Io.Timestamp, input: Input) Error!Outcome {
         if (self.last_now) |last_now| {

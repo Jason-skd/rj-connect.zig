@@ -8,6 +8,7 @@ pub const Action = union(enum) {
     request_credentials: types.CredentialPurpose,
     poll_dhcp,
     direct_auth_result: types.DirectAuthResult,
+    reauth_required,
 };
 
 pub const Outcome = struct {

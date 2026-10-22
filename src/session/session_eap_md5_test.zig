@@ -854,6 +854,18 @@ test "Session starts SAM direct communication and accepts its ACK" {
     try std.testing.expect(auth.success);
     try std.testing.expectEqualStrings("ok", auth.server_message_gbk.?);
     try std.testing.expectEqual(@as(?std.Io.Timestamp, null), value.nextDeadline());
+
+    var canceled = try value.step(timestamp(10 * std.time.ns_per_s), .cancel);
+    defer canceled.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase.idle, canceled.phase);
+    try std.testing.expectEqual(FailureReason.canceled, canceled.failure.?);
+    try std.testing.expectEqual(@as(usize, 1), canceled.actions.len);
+    const logoff = try eapol.decode(canceled.actions[0].send_frame);
+    try std.testing.expectEqual(eapol.PacketType.logoff, logoff.packet_type);
+    try std.testing.expectError(
+        error.InvalidState,
+        value.step(timestamp(11 * std.time.ns_per_s), .cancel),
+    );
 }
 
 fn encodeAck(

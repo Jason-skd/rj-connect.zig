@@ -169,11 +169,15 @@ pub const DirectSessionConfig = struct {
     max_message_size: usize = 1024 * 1024,
     ack_timeout: std.Io.Duration = .fromSeconds(3),
     max_send_attempts: u8 = 3,
+    heartbeat_interval: std.Io.Duration = .fromSeconds(0),
+    reauth_interval: std.Io.Duration = .fromSeconds(0),
 
     pub fn validate(self: DirectSessionConfig) Error!void {
         if (self.username_gbk.len == 0 or self.username_gbk.len > 255 or
             self.max_message_size == 0 or self.max_message_size > std.math.maxInt(u32) or
-            self.ack_timeout.toNanoseconds() <= 0 or self.max_send_attempts == 0)
+            self.ack_timeout.toNanoseconds() <= 0 or self.max_send_attempts == 0 or
+            self.heartbeat_interval.toNanoseconds() < 0 or
+            self.reauth_interval.toNanoseconds() < 0)
         {
             return error.InvalidConfig;
         }
