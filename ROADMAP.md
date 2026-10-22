@@ -40,6 +40,50 @@
 - 测试覆盖重试、超时、取消、分片乱序、重放和会话终止。
 - 不要求运行客户端即可验证状态转换、报文编解码和直接通信重组。
 
+## 设计决策
+
+- 公开入口为一个受控可变的 `Session`。认证、网络完成和直接通信作为内部正交子状态，调用方只维护一个会话生命周期。
+- `Session` 不创建线程、定时器或网络资源，不接受回调 provider。所有推进都由调用方显式提交输入。
+- 绝对时间使用 `std.Io.Timestamp`，时长使用 `std.Io.Duration`。输入时间必须单调不减；时间倒退返回明确错误。
+- `Session.init` 显式接收 allocator。`step` 返回拥有动作列表和报文字节的 `Outcome`，调用方通过 `Outcome.deinit` 释放。
+- 分配失败时不得提交部分状态。只有完整生成并校验本次结果后，`Session` 才更新内部状态。
+- 输入通过统一事件联合提交。帧和隧道字节仅在本次调用内借用，`Session` 不保留调用方缓冲区。
+- 用户名和密码通过 `credentials` 输入事件提供。库不持久化密码，不调用凭据 provider；需要凭据时返回 `need_credentials` 动作。
+- PEAP 的 TLS 握手、证书验证和 MSCHAPv2 密码学交换位于库外。库通过 `tunnel_input` 接收隧道字节，并返回不透明 `tunnel_output` 动作。
+- 协议引擎返回待发送报文、截止时间、状态变化和可区分错误；调用方决定传输方式、发送顺序和失败恢复策略。
+
+### 会话接口约束
+
+```zig
+pub fn step(
+    session: *Session,
+    now: std.Io.Timestamp,
+    input: Input,
+) Error!Outcome;
+```
+
+`Outcome` 至少包含动作列表、`next_deadline: ?std.Io.Timestamp` 和状态变化。动作可以是待发送帧、隧道输出、凭据请求、成功、失败或下线通知。
+
+`Input` 至少包含：
+
+```zig
+frame
+timer
+credentials
+tunnel_input
+external_result
+```
+
+调用方在截止时间到达时提交 `timer`，并把当前时间作为 `now`；协议引擎根据内部截止时间判断重试、held 或失败。协议引擎不注册或运行定时器。
+
+## 实施顺序
+
+1. 实现 EAPOL/EAP codec，覆盖帧类型、长度、identifier、MD5 challenge 和错误边界。
+2. 实现 EAP-MD5 确定性 `Session`，覆盖 connecting、acquired、authenticating、held、logoff、动作和截止时间。
+3. 实现直接通信分片、重组、时间戳窗口和响应动作。
+4. 实现 PEAP 隧道内 EAP 与锐捷私有字段编排，继续保持 TLS provider 在库外。
+5. 增加跨状态、重试、乱序、重放和资源生命周期测试。
+
 ## 里程碑
 
 - “离线协议与密码学基础”已实施：`244a354`。
