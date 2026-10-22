@@ -1,9 +1,11 @@
 const std = @import("std");
 
+/// Encrypts one legacy DES block for protocol compatibility.
 pub fn encryptBlock(key: [8]u8, block: [8]u8) [8]u8 {
     return transformBlock(key, block, false);
 }
 
+/// Decrypts one legacy DES block for protocol compatibility.
 pub fn decryptBlock(key: [8]u8, block: [8]u8) [8]u8 {
     return transformBlock(key, block, true);
 }
@@ -13,6 +15,7 @@ pub const CbcError = error{
     OutputTooSmall,
 };
 
+/// Encrypts complete blocks with the legacy DES-CBC mode used by direct messages.
 pub fn encryptCbc(
     key: [8]u8,
     iv: [8]u8,
@@ -33,6 +36,7 @@ pub fn encryptCbc(
     return plaintext.len;
 }
 
+/// Decrypts complete blocks with the legacy DES-CBC mode used by direct messages.
 pub fn decryptCbc(
     key: [8]u8,
     iv: [8]u8,

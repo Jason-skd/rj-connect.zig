@@ -60,7 +60,7 @@ pub fn decodeHeader(encoded: *const [header_size]u8) DecodeError!Header {
     };
 }
 
-/// Computes the authenticator over a zeroed header, payload, key, and IV.
+/// Computes the legacy MD5 authenticator over a zeroed header, payload, key, and IV.
 pub fn computeAuthenticator(
     packet: []const u8,
     key: [8]u8,

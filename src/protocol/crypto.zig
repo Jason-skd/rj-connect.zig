@@ -15,6 +15,7 @@ pub fn passwordCiphertextSize(plain_len: usize) usize {
 }
 
 /// Encrypts a password with the chained MD5 form used by the vendor attributes.
+/// This is a legacy compatibility primitive, not a general password-storage scheme.
 pub fn encryptPassword(
     username: []const u8,
     challenge: [16]u8,
@@ -50,7 +51,8 @@ pub fn encryptPassword(
     return ciphertext_len;
 }
 
-/// Applies RC4 in place by writing the transformed bytes to output.
+/// Applies RC4 to a legacy protocol field.
+/// RC4 is retained only for compatibility and must not be used for new security designs.
 pub fn applyRc4(key: []const u8, input: []const u8, output: []u8) Rc4Error!usize {
     if (key.len == 0) return error.EmptyKey;
     if (output.len < input.len) return error.OutputTooSmall;
