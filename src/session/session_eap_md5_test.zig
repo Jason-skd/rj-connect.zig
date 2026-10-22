@@ -837,6 +837,7 @@ test "Session starts SAM direct communication and accepts its ACK" {
     const result_frame = try encodeData(
         &result_frame_buffer,
         77,
+        1,
         result_encrypted.len,
         101,
         &result_encrypted,
@@ -954,6 +955,7 @@ test "Session ignores an SMP hello without complete business TLVs" {
     const malformed_frame = try encodeData(
         &malformed_frame_buffer,
         40,
+        1,
         malformed_encrypted.len,
         100,
         &malformed_encrypted,
@@ -986,6 +988,7 @@ test "Session ignores an SMP hello without complete business TLVs" {
     const valid_frame = try encodeData(
         &valid_frame_buffer,
         41,
+        1,
         @intCast(encrypted_len),
         101,
         valid_encrypted[0..encrypted_len],
@@ -1001,6 +1004,84 @@ test "Session ignores an SMP hello without complete business TLVs" {
     defer accepted.deinit(std.testing.allocator);
     try std.testing.expectEqual(ActivePhase{ .direct = .initializing }, accepted.phase);
     try std.testing.expectEqual(@as(usize, 2), accepted.actions.len);
+}
+
+test "Session reassembles a fragmented SAM result through its public API" {
+    var value = try authenticateEapMd5();
+    defer value.deinit();
+
+    const config = samDirectConfig();
+    try enterSamAwaitingResult(&value, config);
+
+    const plaintext = try std.testing.allocator.alloc(u8, 1360);
+    defer std.testing.allocator.free(plaintext);
+    @memset(plaintext, 0);
+    plaintext[0..13].* = .{
+        1,    1,   12,
+        0x09, 8,   0x02,
+        2,    'o', 'k',
+        0x13, 1,   1,
+        0,
+    };
+    const encrypted = try std.testing.allocator.alloc(u8, plaintext.len);
+    defer std.testing.allocator.free(encrypted);
+    _ = try des.encryptCbc(config.des_key, config.initial_iv, plaintext, encrypted);
+
+    const sender: direct.Endpoint = .{
+        .mac = config.peer_mac,
+        .ip = config.peer_ipv4,
+        .port = config.peer_udp_port,
+    };
+    const receiver: direct.Endpoint = .{
+        .mac = config.network.mac,
+        .ip = config.network.ipv4,
+        .port = config.local_udp_port,
+    };
+
+    var first_frame_buffer: [2048]u8 = undefined;
+    const first_frame = try encodeData(
+        &first_frame_buffer,
+        80,
+        2,
+        @intCast(encrypted.len),
+        100,
+        encrypted[0..1358],
+        sender,
+        receiver,
+        config.des_key,
+        config.initial_iv,
+    );
+    var first = try value.step(
+        timestamp(9 * std.time.ns_per_s),
+        frameInput(&value, first_frame),
+    );
+    try std.testing.expectEqual(ActivePhase{ .direct = .awaiting_result }, first.phase);
+    try std.testing.expectEqual(@as(usize, 1), first.actions.len);
+    first.deinit(std.testing.allocator);
+
+    var last_frame_buffer: [256]u8 = undefined;
+    const last_frame = try encodeData(
+        &last_frame_buffer,
+        81,
+        4,
+        @intCast(encrypted.len),
+        101,
+        encrypted[1358..],
+        sender,
+        receiver,
+        config.des_key,
+        config.initial_iv,
+    );
+    var completed = try value.step(
+        timestamp(9 * std.time.ns_per_s),
+        frameInput(&value, last_frame),
+    );
+    defer completed.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase{ .direct = .active }, completed.phase);
+    try std.testing.expectEqual(@as(usize, 2), completed.actions.len);
+    const result = completed.actions[1].direct_auth_result;
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("ok", result.server_message_gbk.?);
 }
 
 test "Session can re-enter EAP after an SMP Direct session ends" {
@@ -1055,6 +1136,7 @@ fn encodeAck(
 fn encodeData(
     output: []u8,
     id: u32,
+    flags: u8,
     total_len: u32,
     direct_timestamp: u64,
     encrypted: []const u8,
@@ -1072,7 +1154,7 @@ fn encodeData(
         .session_id = 0x1122_3344,
         .timestamp = direct_timestamp,
         .message_type = 1,
-        .flags = 1,
+        .flags = flags,
         .total_len = total_len,
     }, encrypted, sender, receiver, output);
     try direct.setAuthenticator(encoded, key, iv);
@@ -1092,6 +1174,50 @@ fn authenticateEapMd5() !Session {
     );
     authenticated.deinit(std.testing.allocator);
     return value;
+}
+
+fn enterSamAwaitingResult(value: *Session, config: session_api.DirectSessionConfig) !void {
+    var started = try value.step(timestamp(6 * std.time.ns_per_s), .{
+        .direct_session = config,
+    });
+    const handshake = try direct.decodeFrame(started.actions[0].send_frame);
+    var handshake_ack_buffer: [256]u8 = undefined;
+    const handshake_ack = try encodeAck(
+        &handshake_ack_buffer,
+        handshake.header.id,
+        handshake.header.session_id,
+        handshake.header.timestamp,
+        handshake.destination,
+        handshake.source,
+        config.des_key,
+        config.initial_iv,
+    );
+    started.deinit(std.testing.allocator);
+
+    var acknowledged = try value.step(
+        timestamp(7 * std.time.ns_per_s),
+        frameInput(value, handshake_ack),
+    );
+    const user_info = try direct.decodeFrame(acknowledged.actions[0].send_frame);
+    var user_info_ack_buffer: [256]u8 = undefined;
+    const user_info_ack = try encodeAck(
+        &user_info_ack_buffer,
+        user_info.header.id,
+        user_info.header.session_id,
+        user_info.header.timestamp,
+        user_info.destination,
+        user_info.source,
+        config.des_key,
+        config.initial_iv,
+    );
+    acknowledged.deinit(std.testing.allocator);
+
+    var waiting = try value.step(
+        timestamp(8 * std.time.ns_per_s),
+        frameInput(value, user_info_ack),
+    );
+    defer waiting.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase{ .direct = .awaiting_result }, waiting.phase);
 }
 
 fn samDirectConfig() session_api.DirectSessionConfig {
