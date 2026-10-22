@@ -1,7 +1,24 @@
 //! Deterministic EAP-MD5 authentication state and external event handling.
 
 const std = @import("std");
-const eapol = @import("eapol.zig");
+const eapol = @import("../protocol/eapol.zig");
+
+/// Identifies one authentication attempt. Network frames, timers, and external
+/// results must carry the generation returned by the attempt that requested them.
+pub const Generation = struct {
+    value: u32,
+
+    pub const initial: Generation = .{ .value = 0 };
+
+    pub fn eql(self: Generation, other: Generation) bool {
+        return self.value == other.value;
+    }
+
+    fn next(self: Generation) Error!Generation {
+        if (self.value == std.math.maxInt(u32)) return error.GenerationOverflow;
+        return .{ .value = self.value + 1 };
+    }
+};
 
 pub const Phase = enum {
     disconnected,
@@ -59,15 +76,25 @@ pub const ExternalResult = union(enum) {
     dhcp_lease: DhcpLease,
 };
 
+pub const ExternalResultInput = struct {
+    generation: Generation,
+    result: ExternalResult,
+};
+
+pub const FrameInput = struct {
+    generation: Generation,
+    bytes: []const u8,
+};
+
 /// Byte slices in an input event are borrowed and must remain valid for one call only.
+/// Asynchronous inputs are ignored with `StaleGeneration` after a new attempt begins.
 pub const Input = union(enum) {
     start,
     cancel,
-    frame: []const u8,
-    timer: void,
+    frame: FrameInput,
+    timer: Generation,
     credentials: Credentials,
-    tunnel_input: []const u8,
-    external_result: ExternalResult,
+    external_result: ExternalResultInput,
 };
 
 pub const Action = union(enum) {
@@ -83,6 +110,7 @@ pub const Outcome = struct {
     phase: Phase,
     next_deadline: ?std.Io.Timestamp,
     failure: ?FailureReason,
+    generation: Generation,
 
     /// Releases every owned frame and the action slice using the allocator passed to `Session.init`.
     pub fn deinit(self: *Outcome, allocator: std.mem.Allocator) void {
@@ -109,34 +137,69 @@ pub const Error = error{
     UnsupportedEapMethod,
     TimeWentBackwards,
     TimestampOverflow,
+    StaleGeneration,
+    GenerationOverflow,
     OutOfMemory,
 };
 
-const PendingCredentials = enum {
+const PendingCredentials = union(enum) {
     identity,
-    md5_challenge,
+    md5_challenge: [16]u8,
     credential_request,
+};
+
+const Exchange = struct {
+    peer_mac: [6]u8,
+    identifier: u8,
+    last_inbound_type: eapol.EapType,
+    last_response_identifier: ?u8,
+    pending: ?PendingCredentials,
+};
+
+const Connecting = struct {
+    deadline: std.Io.Timestamp,
+    attempts: u16,
+    exchange: ?Exchange,
+};
+
+const NetworkCompletion = struct {
+    deadline: std.Io.Timestamp,
+    poll_attempts: u8,
+    peer_mac: [6]u8,
+};
+
+const Held = struct {
+    deadline: std.Io.Timestamp,
+    peer_mac: ?[6]u8,
+};
+
+const State = union(enum) {
+    disconnected,
+    connecting: Connecting,
+    acquired: struct {
+        deadline: std.Io.Timestamp,
+        exchange: Exchange,
+    },
+    authenticating: struct {
+        deadline: std.Io.Timestamp,
+        exchange: Exchange,
+    },
+    network_completion: NetworkCompletion,
+    authenticated: struct {
+        peer_mac: [6]u8,
+    },
+    held: Held,
 };
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
     config: Config,
-    current_phase: Phase,
-    current_deadline: ?std.Io.Timestamp,
+    state: State,
+    generation: Generation,
     last_now: ?std.Io.Timestamp,
-    current_identifier: ?u8,
-    last_inbound_type: ?eapol.EapType,
-    last_response_identifier: ?u8,
-    challenge: ?[16]u8,
-    pending_credentials: ?PendingCredentials,
-    peer_mac: ?[6]u8,
-    connect_attempts: u16,
     auth_failures: u16,
     failure_reason: ?FailureReason,
     dhcp_step: DhcpStep,
-    dhcp_poll_attempts: u8,
-    network_completion_pending: bool,
-    awaiting_dhcp_result: bool,
 
     /// Creates a disconnected session. No allocation occurs until `step` produces an outcome.
     pub fn init(allocator: std.mem.Allocator, config: Config) Error!Session {
@@ -152,31 +215,35 @@ pub const Session = struct {
         return .{
             .allocator = allocator,
             .config = config,
-            .current_phase = .disconnected,
-            .current_deadline = null,
+            .state = .disconnected,
+            .generation = Generation.initial,
             .last_now = null,
-            .current_identifier = null,
-            .last_inbound_type = null,
-            .last_response_identifier = null,
-            .challenge = null,
-            .pending_credentials = null,
-            .peer_mac = null,
-            .connect_attempts = 0,
             .auth_failures = 0,
             .failure_reason = null,
             .dhcp_step = .none,
-            .dhcp_poll_attempts = 0,
-            .network_completion_pending = false,
-            .awaiting_dhcp_result = false,
         };
     }
 
     pub fn phase(self: *const Session) Phase {
-        return self.current_phase;
+        return switch (self.state) {
+            .disconnected => .disconnected,
+            .connecting => .connecting,
+            .acquired => .acquired,
+            .authenticating, .network_completion => .authenticating,
+            .authenticated => .authenticated,
+            .held => .held,
+        };
     }
 
     pub fn nextDeadline(self: *const Session) ?std.Io.Timestamp {
-        return self.current_deadline;
+        return switch (self.state) {
+            .connecting => |state| state.deadline,
+            .acquired => |state| state.deadline,
+            .authenticating => |state| state.deadline,
+            .network_completion => |state| state.deadline,
+            .held => |state| state.deadline,
+            .disconnected, .authenticated => null,
+        };
     }
 
     pub fn failure(self: *const Session) ?FailureReason {
@@ -188,7 +255,15 @@ pub const Session = struct {
     }
 
     pub fn dhcpPollAttempts(self: *const Session) u8 {
-        return self.dhcp_poll_attempts;
+        return switch (self.state) {
+            .network_completion => |state| state.poll_attempts,
+            else => 0,
+        };
+    }
+
+    /// Returns the token required by asynchronous inputs to the current attempt.
+    pub fn currentGeneration(self: *const Session) Generation {
+        return self.generation;
     }
 
     /// Accepts one external event and commits state only after every returned action is allocated.
@@ -199,69 +274,64 @@ pub const Session = struct {
 
         var next = self.*;
         next.last_now = now;
-        const previous_phase = next.current_phase;
+        const previous_phase = next.phase();
         var builder = OutcomeBuilder.init(next.allocator);
         errdefer builder.deinit();
 
         switch (input) {
             .start => {
-                if (next.current_phase != .disconnected and next.current_phase != .logoff) {
-                    return error.InvalidState;
+                switch (next.state) {
+                    .disconnected => {},
+                    else => return error.InvalidState,
                 }
 
-                next.resetAuthentication();
                 next.auth_failures = 0;
                 next.failure_reason = null;
                 next.dhcp_step = .none;
-                next.dhcp_poll_attempts = 0;
-                next.network_completion_pending = false;
-                next.awaiting_dhcp_result = false;
-                next.connect_attempts = 1;
-                try next.enterConnecting(now);
+                try next.enterConnecting(now, 1);
                 try builder.addFrame(try next.makeStartFrame());
             },
-            .frame => |bytes| {
-                const frame = eapol.decode(bytes) catch return error.InvalidFrame;
+            .frame => |event| {
+                if (!event.generation.eql(next.generation)) return error.StaleGeneration;
+                const frame = eapol.decode(event.bytes) catch return error.InvalidFrame;
                 try next.handleFrame(now, frame, &builder);
             },
-            .credentials => |credentials| {
-                try next.handleCredentials(now, credentials, &builder);
+            .credentials => |credentials| try next.handleCredentials(now, credentials, &builder),
+            .timer => |generation| {
+                if (!generation.eql(next.generation)) return error.StaleGeneration;
+                try next.handleTimer(now, &builder);
             },
-            .timer => try next.handleTimer(now, &builder),
             .cancel => try next.handleCancel(&builder),
-            .external_result => |result| try next.handleExternalResult(now, result, &builder),
-            .tunnel_input => return error.InvalidInput,
+            .external_result => |event| {
+                if (!event.generation.eql(next.generation)) return error.StaleGeneration;
+                try next.handleExternalResult(now, event.result, &builder);
+            },
         }
 
         const actions = try builder.finish();
         self.* = next;
         const outcome_phase: Phase = if (previous_phase != .disconnected and
-            next.current_phase == .disconnected)
+            next.phase() == .disconnected)
             .logoff
         else
-            next.current_phase;
+            next.phase();
         return .{
             .actions = actions,
             .previous_phase = previous_phase,
             .phase = outcome_phase,
-            .next_deadline = next.current_deadline,
+            .next_deadline = next.nextDeadline(),
             .failure = next.failure_reason,
+            .generation = next.generation,
         };
     }
 
-    fn resetAuthentication(self: *Session) void {
-        self.current_identifier = null;
-        self.last_inbound_type = null;
-        self.last_response_identifier = null;
-        self.challenge = null;
-        self.pending_credentials = null;
-        self.peer_mac = null;
-    }
-
-    fn enterConnecting(self: *Session, now: std.Io.Timestamp) Error!void {
-        self.resetAuthentication();
-        self.current_phase = .connecting;
-        self.current_deadline = try addDuration(now, self.config.start_timeout);
+    fn enterConnecting(self: *Session, now: std.Io.Timestamp, attempts: u16) Error!void {
+        self.generation = try self.generation.next();
+        self.state = .{ .connecting = .{
+            .deadline = try addDuration(now, self.config.start_timeout),
+            .attempts = attempts,
+            .exchange = null,
+        } };
     }
 
     fn makeStartFrame(self: *Session) Error![]u8 {
@@ -278,107 +348,167 @@ pub const Session = struct {
         builder: *OutcomeBuilder,
     ) Error!void {
         if (frame.packet_type == .logoff) {
-            if (self.current_phase == .disconnected or self.current_phase == .logoff) {
-                return error.InvalidState;
+            switch (self.state) {
+                .disconnected => return error.InvalidState,
+                else => {},
             }
             self.failure_reason = .server_logoff;
-            try self.enterLogoffState();
+            self.state = .disconnected;
             return;
         }
         if (frame.packet_type != .eap) return error.InvalidState;
         const eap = frame.eap orelse return error.InvalidFrame;
-        self.peer_mac = frame.source;
 
         switch (eap.code) {
-            .request => {
-                if (self.current_phase != .connecting and
-                    self.current_phase != .acquired and
-                    self.current_phase != .authenticating)
-                {
-                    return error.InvalidState;
-                }
-                try self.acceptRequestIdentifier(eap);
-
-                switch (eap.type orelse return error.InvalidFrame) {
-                    .identity => {
-                        self.current_phase = .acquired;
-                        self.challenge = null;
-                        self.pending_credentials = .identity;
-                        self.current_deadline = try addDuration(now, self.config.auth_timeout);
-                        try builder.addAction(.{ .request_credentials = .identity });
-                    },
-                    .md5_challenge => {
-                        const decoded = eapol.decodeMd5Challenge(eap) catch return error.InvalidFrame;
-                        self.challenge = decoded.challenge;
-                        self.current_phase = .authenticating;
-                        self.pending_credentials = .md5_challenge;
-                        self.current_deadline = try addDuration(now, self.config.auth_timeout);
-                        try builder.addAction(.{ .request_credentials = .md5_challenge });
-                    },
-                    .notification => {
-                        try builder.addFrame(try self.makeEapResponse(eap.identifier, .notification, &.{}));
-                        self.last_response_identifier = eap.identifier;
-                    },
-                    .credential => {
-                        self.current_phase = .authenticating;
-                        self.pending_credentials = .credential_request;
-                        self.current_deadline = try addDuration(now, self.config.auth_timeout);
-                        try builder.addAction(.{ .request_credentials = .credential_request });
-                    },
-                    .peap => return error.UnsupportedEapMethod,
-                    else => {
-                        try builder.addFrame(try self.makeNakFrame(eap.identifier));
-                        self.last_response_identifier = eap.identifier;
-                    },
-                }
-            },
-            .success => {
-                if (self.current_phase != .authenticating) return error.InvalidState;
-                if (self.network_completion_pending) return error.DuplicateFrame;
-                try self.validateTerminalIdentifier(eap.identifier);
-                self.auth_failures = 0;
-                if (self.config.dhcp_second_auth and self.dhcp_step == .first) {
-                    self.network_completion_pending = true;
-                    self.awaiting_dhcp_result = true;
-                    self.dhcp_poll_attempts = 1;
-                    self.current_deadline = try addDuration(now, .fromSeconds(2));
-                    try builder.addAction(.poll_dhcp);
-                } else {
-                    self.current_phase = .authenticated;
-                    self.current_deadline = null;
-                    self.challenge = null;
-                    self.pending_credentials = null;
-                    self.network_completion_pending = false;
-                    self.awaiting_dhcp_result = false;
-                }
-            },
-            .failure => {
-                if (self.current_phase != .authenticating) return error.InvalidState;
-                try self.validateTerminalIdentifier(eap.identifier);
-                try self.enterHeld(now, .server_failure);
-            },
+            .request => try self.handleRequest(now, frame.source, eap, builder),
+            .success => try self.handleSuccess(now, eap, builder),
+            .failure => try self.handleFailure(now, eap),
             else => return error.InvalidFrame,
         }
     }
 
-    fn acceptRequestIdentifier(self: *Session, eap: eapol.Eap) Error!void {
-        if (self.current_identifier) |identifier| {
-            if (eap.identifier == identifier) {
-                if (self.last_inbound_type == eap.type) return error.DuplicateFrame;
-                return error.StaleIdentifier;
-            }
-            if (eap.identifier != identifier +% 1) return error.StaleIdentifier;
+    fn handleRequest(
+        self: *Session,
+        now: std.Io.Timestamp,
+        source: [6]u8,
+        eap: eapol.Eap,
+        builder: *OutcomeBuilder,
+    ) Error!void {
+        const eap_type = eap.type orelse return error.InvalidFrame;
+        var exchange: ?Exchange = switch (self.state) {
+            .connecting => |state| state.exchange,
+            .acquired => |state| state.exchange,
+            .authenticating => |state| state.exchange,
+            else => return error.InvalidState,
+        };
+        try acceptRequestIdentifier(&exchange, source, eap, eap_type);
+
+        switch (eap_type) {
+            .identity => {
+                exchange.?.pending = .identity;
+                self.state = .{ .acquired = .{
+                    .deadline = try addDuration(now, self.config.auth_timeout),
+                    .exchange = exchange.?,
+                } };
+                try builder.addAction(.{ .request_credentials = .identity });
+            },
+            .md5_challenge => {
+                const decoded = eapol.decodeMd5Challenge(eap) catch return error.InvalidFrame;
+                exchange.?.pending = .{ .md5_challenge = decoded.challenge };
+                self.state = .{ .authenticating = .{
+                    .deadline = try addDuration(now, self.config.auth_timeout),
+                    .exchange = exchange.?,
+                } };
+                try builder.addAction(.{ .request_credentials = .md5_challenge });
+            },
+            .notification => {
+                try builder.addFrame(try self.makeEapResponse(
+                    exchange.?.peer_mac,
+                    exchange.?.identifier,
+                    .notification,
+                    &.{},
+                ));
+                exchange.?.last_response_identifier = exchange.?.identifier;
+                self.replaceExchange(exchange.?);
+            },
+            .credential => {
+                exchange.?.pending = .credential_request;
+                self.state = .{ .authenticating = .{
+                    .deadline = try addDuration(now, self.config.auth_timeout),
+                    .exchange = exchange.?,
+                } };
+                try builder.addAction(.{ .request_credentials = .credential_request });
+            },
+            .peap => return error.UnsupportedEapMethod,
+            else => {
+                try builder.addFrame(try self.makeNakFrame(
+                    exchange.?.peer_mac,
+                    exchange.?.identifier,
+                ));
+                exchange.?.last_response_identifier = exchange.?.identifier;
+                self.replaceExchange(exchange.?);
+            },
         }
-        self.current_identifier = eap.identifier;
-        self.last_inbound_type = eap.type;
-        self.last_response_identifier = null;
     }
 
-    fn validateTerminalIdentifier(self: *Session, identifier: u8) Error!void {
-        if (self.last_response_identifier == null or
-            self.last_response_identifier.? != identifier)
-        {
+    fn handleSuccess(
+        self: *Session,
+        now: std.Io.Timestamp,
+        eap: eapol.Eap,
+        builder: *OutcomeBuilder,
+    ) Error!void {
+        switch (self.state) {
+            .network_completion => return error.DuplicateFrame,
+            .authenticating => |state| {
+                try validateTerminalIdentifier(state.exchange.last_response_identifier, eap.identifier);
+                self.auth_failures = 0;
+                if (self.config.dhcp_second_auth and self.dhcp_step == .first) {
+                    self.state = .{ .network_completion = .{
+                        .deadline = try addDuration(now, .fromSeconds(2)),
+                        .poll_attempts = 1,
+                        .peer_mac = state.exchange.peer_mac,
+                    } };
+                    try builder.addAction(.poll_dhcp);
+                } else {
+                    self.state = .{ .authenticated = .{
+                        .peer_mac = state.exchange.peer_mac,
+                    } };
+                }
+            },
+            else => return error.InvalidState,
+        }
+    }
+
+    fn handleFailure(self: *Session, now: std.Io.Timestamp, eap: eapol.Eap) Error!void {
+        switch (self.state) {
+            .authenticating => |state| {
+                try validateTerminalIdentifier(state.exchange.last_response_identifier, eap.identifier);
+                try self.enterHeld(now, state.exchange.peer_mac, .server_failure);
+            },
+            else => return error.InvalidState,
+        }
+    }
+
+    fn acceptRequestIdentifier(
+        exchange: *?Exchange,
+        source: [6]u8,
+        eap: eapol.Eap,
+        eap_type: eapol.EapType,
+    ) Error!void {
+        if (exchange.*) |*current| {
+            if (eap.identifier == current.identifier) {
+                if (current.last_inbound_type == eap_type) return error.DuplicateFrame;
+                return error.StaleIdentifier;
+            }
+            if (eap.identifier != current.identifier +% 1) return error.StaleIdentifier;
+            current.peer_mac = source;
+            current.identifier = eap.identifier;
+            current.last_inbound_type = eap_type;
+            current.last_response_identifier = null;
+            return;
+        }
+
+        exchange.* = .{
+            .peer_mac = source,
+            .identifier = eap.identifier,
+            .last_inbound_type = eap_type,
+            .last_response_identifier = null,
+            .pending = null,
+        };
+    }
+
+    fn validateTerminalIdentifier(last_response: ?u8, identifier: u8) Error!void {
+        if (last_response == null or last_response.? != identifier) {
             return error.StaleIdentifier;
+        }
+    }
+
+    fn replaceExchange(self: *Session, exchange: Exchange) void {
+        switch (self.state) {
+            .connecting => |*state| state.exchange = exchange,
+            .acquired => |*state| state.exchange = exchange,
+            .authenticating => |*state| state.exchange = exchange,
+            else => unreachable,
         }
     }
 
@@ -388,36 +518,61 @@ pub const Session = struct {
         credentials: Credentials,
         builder: *OutcomeBuilder,
     ) Error!void {
-        const pending = self.pending_credentials orelse return error.InvalidInput;
+        var exchange = switch (self.state) {
+            .acquired => |state| state.exchange,
+            .authenticating => |state| state.exchange,
+            else => return error.InvalidInput,
+        };
+        const pending = exchange.pending orelse return error.InvalidInput;
         if (credentials.username.len == 0 or credentials.username.len > std.math.maxInt(u16) - 38) {
             return error.InvalidCredentials;
         }
-        const identifier = self.current_identifier orelse return error.InvalidState;
 
         const frame = switch (pending) {
-            .identity => try self.makeEapResponse(identifier, .identity, credentials.username),
-            .md5_challenge => blk: {
-                const challenge = self.challenge orelse return error.InvalidState;
+            .identity => try self.makeEapResponse(
+                exchange.peer_mac,
+                exchange.identifier,
+                .identity,
+                credentials.username,
+            ),
+            .md5_challenge => |challenge| blk: {
                 var data: [33 + 255]u8 = undefined;
                 if (credentials.username.len > 255) return error.InvalidCredentials;
                 const encoded = eapol.encodeMd5ResponseData(
-                    identifier,
+                    exchange.identifier,
                     credentials.username,
                     challenge,
                     &data,
                 ) catch return error.InvalidCredentials;
-                break :blk try self.makeEapResponse(identifier, .md5_challenge, encoded);
+                break :blk try self.makeEapResponse(
+                    exchange.peer_mac,
+                    exchange.identifier,
+                    .md5_challenge,
+                    encoded,
+                );
             },
             .credential_request => try self.makeCredentialResponse(
-                identifier,
+                exchange.peer_mac,
+                exchange.identifier,
                 credentials.username,
                 credentials.password,
             ),
         };
         try builder.addFrame(frame);
-        self.pending_credentials = null;
-        self.last_response_identifier = identifier;
-        self.current_deadline = try addDuration(now, self.config.auth_timeout);
+        exchange.pending = null;
+        exchange.last_response_identifier = exchange.identifier;
+
+        switch (self.state) {
+            .acquired => self.state = .{ .acquired = .{
+                .deadline = try addDuration(now, self.config.auth_timeout),
+                .exchange = exchange,
+            } },
+            .authenticating => self.state = .{ .authenticating = .{
+                .deadline = try addDuration(now, self.config.auth_timeout),
+                .exchange = exchange,
+            } },
+            else => unreachable,
+        }
         if (self.config.dhcp_second_auth and self.dhcp_step == .none) {
             self.dhcp_step = .first;
         }
@@ -425,6 +580,7 @@ pub const Session = struct {
 
     fn makeEapResponse(
         self: *Session,
+        peer_mac: [6]u8,
         identifier: u8,
         eap_type: eapol.EapType,
         data: []const u8,
@@ -433,7 +589,7 @@ pub const Session = struct {
         const frame = try self.allocator.alloc(u8, frame_len);
         errdefer self.allocator.free(frame);
         _ = eapol.encodeEap(
-            self.peer_mac orelse self.config.destination_mac,
+            peer_mac,
             self.config.source_mac,
             .response,
             identifier,
@@ -444,8 +600,9 @@ pub const Session = struct {
         return frame;
     }
 
-    fn makeNakFrame(self: *Session, identifier: u8) Error![]u8 {
+    fn makeNakFrame(self: *Session, peer_mac: [6]u8, identifier: u8) Error![]u8 {
         return self.makeEapResponse(
+            peer_mac,
             identifier,
             .legacy_nak,
             &.{@backingInt(eapol.EapType.md5_challenge)},
@@ -454,6 +611,7 @@ pub const Session = struct {
 
     fn makeCredentialResponse(
         self: *Session,
+        peer_mac: [6]u8,
         identifier: u8,
         username: []const u8,
         password: []const u8,
@@ -467,34 +625,35 @@ pub const Session = struct {
         data[0] = @intCast(username.len);
         @memcpy(data[1 .. 1 + username.len], username);
         @memcpy(data[1 + username.len ..], password);
-        return self.makeEapResponse(identifier, .credential, data);
+        return self.makeEapResponse(peer_mac, identifier, .credential, data);
     }
 
     fn handleTimer(self: *Session, now: std.Io.Timestamp, builder: *OutcomeBuilder) Error!void {
-        const deadline = self.current_deadline orelse return error.InvalidState;
+        const deadline = self.nextDeadline() orelse return error.InvalidState;
         if (now.compare(.lt, deadline)) return error.TimerNotDue;
-        if (self.network_completion_pending) {
-            return self.handleDhcpTimer(now, builder);
-        }
 
-        switch (self.current_phase) {
-            .connecting => {
-                if (self.connect_attempts < self.config.max_start_attempts) {
-                    self.connect_attempts += 1;
-                    try self.enterConnecting(now);
+        switch (self.state) {
+            .connecting => |state| {
+                if (state.attempts < self.config.max_start_attempts) {
+                    try self.enterConnecting(now, state.attempts + 1);
                     try builder.addFrame(try self.makeStartFrame());
                 } else {
-                    try self.enterHeld(now, .start_timeout);
+                    try self.enterHeld(
+                        now,
+                        if (state.exchange) |exchange| exchange.peer_mac else null,
+                        .start_timeout,
+                    );
                 }
             },
-            .acquired, .authenticating => try self.enterHeld(now, .auth_timeout),
-            .held => {
+            .acquired => |state| try self.enterHeld(now, state.exchange.peer_mac, .auth_timeout),
+            .authenticating => |state| try self.enterHeld(now, state.exchange.peer_mac, .auth_timeout),
+            .network_completion => try self.handleDhcpTimer(now, builder),
+            .held => |state| {
                 if (self.auth_failures >= self.config.max_auth_failures) {
-                    try self.enterLogoff(builder);
+                    try self.enterLogoff(state.peer_mac, builder);
                 } else {
                     self.failure_reason = null;
-                    self.connect_attempts = 1;
-                    try self.enterConnecting(now);
+                    try self.enterConnecting(now, 1);
                     try builder.addFrame(try self.makeStartFrame());
                 }
             },
@@ -503,11 +662,12 @@ pub const Session = struct {
     }
 
     fn handleCancel(self: *Session, builder: *OutcomeBuilder) Error!void {
-        if (self.current_phase == .disconnected or self.current_phase == .logoff) {
-            return error.InvalidState;
+        switch (self.state) {
+            .disconnected => return error.InvalidState,
+            else => {},
         }
         self.failure_reason = .canceled;
-        try self.enterLogoff(builder);
+        try self.enterLogoff(self.peerMac(), builder);
     }
 
     fn handleExternalResult(
@@ -516,66 +676,77 @@ pub const Session = struct {
         result: ExternalResult,
         builder: *OutcomeBuilder,
     ) Error!void {
-        if (!self.network_completion_pending or !self.awaiting_dhcp_result) {
-            return error.InvalidState;
+        switch (self.state) {
+            .network_completion => {},
+            else => return error.InvalidState,
         }
-        self.awaiting_dhcp_result = false;
 
         switch (result) {
             .dhcp_lease => |lease| {
                 if (lease.ip == null or lease.gateway == null) return;
-                self.network_completion_pending = false;
                 self.dhcp_step = .second;
-                self.dhcp_poll_attempts = 0;
-                self.connect_attempts = 1;
-                try self.enterConnecting(now);
+                try self.enterConnecting(now, 1);
                 try builder.addFrame(try self.makeStartFrame());
             },
         }
     }
 
     fn handleDhcpTimer(self: *Session, now: std.Io.Timestamp, builder: *OutcomeBuilder) Error!void {
-        if (self.dhcp_poll_attempts >= 21) {
+        const state = switch (self.state) {
+            .network_completion => |state| state,
+            else => return error.InvalidState,
+        };
+        if (state.poll_attempts >= 21) {
             self.failure_reason = .dhcp_timeout;
-            try self.enterLogoff(builder);
+            try self.enterLogoff(state.peer_mac, builder);
             return;
         }
-        self.dhcp_poll_attempts += 1;
-        self.awaiting_dhcp_result = true;
-        self.current_deadline = try addDuration(now, .fromSeconds(2));
+
+        self.state = .{ .network_completion = .{
+            .deadline = try addDuration(now, .fromSeconds(2)),
+            .poll_attempts = state.poll_attempts + 1,
+            .peer_mac = state.peer_mac,
+        } };
         try builder.addAction(.poll_dhcp);
     }
 
-    fn enterHeld(self: *Session, now: std.Io.Timestamp, reason: FailureReason) Error!void {
-        self.current_phase = .held;
-        self.current_deadline = try addDuration(now, self.config.held_timeout);
+    fn enterHeld(
+        self: *Session,
+        now: std.Io.Timestamp,
+        peer_mac: ?[6]u8,
+        reason: FailureReason,
+    ) Error!void {
+        self.state = .{ .held = .{
+            .deadline = try addDuration(now, self.config.held_timeout),
+            .peer_mac = peer_mac,
+        } };
         self.failure_reason = reason;
-        self.challenge = null;
-        self.pending_credentials = null;
         self.auth_failures +|= 1;
-        self.network_completion_pending = false;
-        self.awaiting_dhcp_result = false;
     }
 
-    fn enterLogoff(self: *Session, builder: *OutcomeBuilder) Error!void {
-        const destination = self.peer_mac orelse self.config.destination_mac;
+    fn peerMac(self: *const Session) ?[6]u8 {
+        return switch (self.state) {
+            .connecting => |state| if (state.exchange) |exchange| exchange.peer_mac else null,
+            .acquired => |state| state.exchange.peer_mac,
+            .authenticating => |state| state.exchange.peer_mac,
+            .network_completion => |state| state.peer_mac,
+            .authenticated => |state| state.peer_mac,
+            .held => |state| state.peer_mac,
+            .disconnected => null,
+        };
+    }
+
+    fn enterLogoff(
+        self: *Session,
+        peer_mac: ?[6]u8,
+        builder: *OutcomeBuilder,
+    ) Error!void {
+        const destination = peer_mac orelse self.config.destination_mac;
         const frame = try self.allocator.alloc(u8, eapol.header_size);
         errdefer self.allocator.free(frame);
         eapol.encodeLogoff(destination, self.config.source_mac, frame[0..eapol.header_size]);
         try builder.addFrame(frame);
-        try self.enterLogoffState();
-    }
-
-    fn enterLogoffState(self: *Session) Error!void {
-        self.current_phase = .disconnected;
-        self.current_deadline = null;
-        self.challenge = null;
-        self.pending_credentials = null;
-        self.current_identifier = null;
-        self.last_inbound_type = null;
-        self.last_response_identifier = null;
-        self.network_completion_pending = false;
-        self.awaiting_dhcp_result = false;
+        self.state = .disconnected;
     }
 };
 
@@ -631,6 +802,24 @@ fn timestamp(nanoseconds: i96) std.Io.Timestamp {
     return .fromNanoseconds(nanoseconds);
 }
 
+fn frameInput(session: *const Session, bytes: []const u8) Input {
+    return .{ .frame = .{
+        .generation = session.currentGeneration(),
+        .bytes = bytes,
+    } };
+}
+
+fn timerInput(session: *const Session) Input {
+    return .{ .timer = session.currentGeneration() };
+}
+
+fn externalResultInput(session: *const Session, result: ExternalResult) Input {
+    return .{ .external_result = .{
+        .generation = session.currentGeneration(),
+        .result = result,
+    } };
+}
+
 test "Session start enters connecting and emits EAPOL Start" {
     var session = try Session.init(std.testing.allocator, .{
         .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
@@ -661,6 +850,45 @@ test "Session accepts the caller's initial timestamp without assuming an epoch" 
         timestamp(25 * std.time.ns_per_s),
         outcome.next_deadline.?,
     );
+}
+
+test "Session rejects frames and timers from a previous connection attempt" {
+    var session = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .start_timeout = .fromSeconds(10),
+        .max_start_attempts = 2,
+    });
+    var started = try session.step(timestamp(0), .start);
+    const previous_generation = started.generation;
+    started.deinit(std.testing.allocator);
+
+    var retried = try session.step(
+        timestamp(10 * std.time.ns_per_s),
+        .{ .timer = previous_generation },
+    );
+    const current_generation = retried.generation;
+    retried.deinit(std.testing.allocator);
+    try std.testing.expect(!previous_generation.eql(current_generation));
+
+    const identity = identityRequest(0x16);
+    try std.testing.expectError(
+        error.StaleGeneration,
+        session.step(timestamp(11 * std.time.ns_per_s), .{ .frame = .{
+            .generation = previous_generation,
+            .bytes = &identity,
+        } }),
+    );
+    try std.testing.expectError(
+        error.StaleGeneration,
+        session.step(timestamp(11 * std.time.ns_per_s), .{ .timer = previous_generation }),
+    );
+
+    var acquired = try session.step(timestamp(11 * std.time.ns_per_s), .{ .frame = .{
+        .generation = current_generation,
+        .bytes = &identity,
+    } });
+    defer acquired.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Phase.acquired, acquired.phase);
 }
 
 fn eapolHeader(
@@ -702,7 +930,7 @@ fn prepareChallengeSession(session: *Session) !void {
     started.deinit(std.testing.allocator);
 
     const identity = identityRequest(0x16);
-    var acquired = try session.step(timestamp(std.time.ns_per_s), .{ .frame = &identity });
+    var acquired = try session.step(timestamp(std.time.ns_per_s), frameInput(session, &identity));
     acquired.deinit(std.testing.allocator);
 
     var identified = try session.step(timestamp(2 * std.time.ns_per_s), .{
@@ -711,7 +939,7 @@ fn prepareChallengeSession(session: *Session) !void {
     identified.deinit(std.testing.allocator);
 
     const challenge = md5ChallengeRequest(0x17);
-    var challenged = try session.step(timestamp(3 * std.time.ns_per_s), .{ .frame = &challenge });
+    var challenged = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(session, &challenge));
     challenged.deinit(std.testing.allocator);
 
     var answered = try session.step(timestamp(4 * std.time.ns_per_s), .{
@@ -729,7 +957,7 @@ test "Session drives EAP-MD5 from start to authenticated" {
     started.deinit(std.testing.allocator);
 
     const identity = identityRequest(0x16);
-    var acquired = try session.step(timestamp(std.time.ns_per_s), .{ .frame = &identity });
+    var acquired = try session.step(timestamp(std.time.ns_per_s), frameInput(&session, &identity));
     defer acquired.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.acquired, acquired.phase);
     try std.testing.expectEqual(CredentialPurpose.identity, acquired.actions[0].request_credentials);
@@ -745,7 +973,7 @@ test "Session drives EAP-MD5 from start to authenticated" {
     try std.testing.expectEqualSlices(u8, "alice", identity_response.eap.?.data);
 
     const challenge = md5ChallengeRequest(0x17);
-    var challenged = try session.step(timestamp(3 * std.time.ns_per_s), .{ .frame = &challenge });
+    var challenged = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &challenge));
     defer challenged.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.authenticating, challenged.phase);
     try std.testing.expectEqual(CredentialPurpose.md5_challenge, challenged.actions[0].request_credentials);
@@ -765,7 +993,7 @@ test "Session drives EAP-MD5 from start to authenticated" {
     );
 
     const success = terminalRequest(.success, 0x17);
-    var authenticated = try session.step(timestamp(5 * std.time.ns_per_s), .{ .frame = &success });
+    var authenticated = try session.step(timestamp(5 * std.time.ns_per_s), frameInput(&session, &success));
     defer authenticated.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.authenticating, authenticated.previous_phase);
     try std.testing.expectEqual(Phase.authenticated, authenticated.phase);
@@ -781,7 +1009,7 @@ test "Session holds server failures and logs off after the retry limit" {
     try prepareChallengeSession(&session);
 
     const failure = terminalRequest(.failure, 0x17);
-    var held = try session.step(timestamp(5 * std.time.ns_per_s), .{ .frame = &failure });
+    var held = try session.step(timestamp(5 * std.time.ns_per_s), frameInput(&session, &failure));
     defer held.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.authenticating, held.previous_phase);
     try std.testing.expectEqual(Phase.held, held.phase);
@@ -790,12 +1018,12 @@ test "Session holds server failures and logs off after the retry limit" {
 
     try std.testing.expectError(
         error.TimerNotDue,
-        session.step(timestamp(34 * std.time.ns_per_s), .timer),
+        session.step(timestamp(34 * std.time.ns_per_s), timerInput(&session)),
     );
     try std.testing.expectEqual(Phase.held, session.phase());
     try std.testing.expectEqual(FailureReason.server_failure, session.failure().?);
 
-    var logged_off = try session.step(timestamp(35 * std.time.ns_per_s), .timer);
+    var logged_off = try session.step(timestamp(35 * std.time.ns_per_s), timerInput(&session));
     defer logged_off.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.logoff, logged_off.phase);
     try std.testing.expectEqual(FailureReason.server_failure, logged_off.failure.?);
@@ -815,19 +1043,19 @@ test "Session counts authentication failures across reconnects" {
     const first_failure = terminalRequest(.failure, 0x17);
     var first_held = try session.step(
         timestamp(5 * std.time.ns_per_s),
-        .{ .frame = &first_failure },
+        frameInput(&session, &first_failure),
     );
     try std.testing.expectEqual(FailureReason.server_failure, first_held.failure.?);
     first_held.deinit(std.testing.allocator);
 
-    var retry = try session.step(timestamp(10 * std.time.ns_per_s), .timer);
+    var retry = try session.step(timestamp(10 * std.time.ns_per_s), timerInput(&session));
     retry.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.connecting, session.phase());
 
     const second_identity = identityRequest(0x18);
     var acquired = try session.step(
         timestamp(11 * std.time.ns_per_s),
-        .{ .frame = &second_identity },
+        frameInput(&session, &second_identity),
     );
     acquired.deinit(std.testing.allocator);
 
@@ -839,7 +1067,7 @@ test "Session counts authentication failures across reconnects" {
     const second_challenge = md5ChallengeRequest(0x19);
     var challenged = try session.step(
         timestamp(13 * std.time.ns_per_s),
-        .{ .frame = &second_challenge },
+        frameInput(&session, &second_challenge),
     );
     challenged.deinit(std.testing.allocator);
 
@@ -851,12 +1079,12 @@ test "Session counts authentication failures across reconnects" {
     const second_failure = terminalRequest(.failure, 0x19);
     var second_held = try session.step(
         timestamp(15 * std.time.ns_per_s),
-        .{ .frame = &second_failure },
+        frameInput(&session, &second_failure),
     );
     try std.testing.expectEqual(Phase.held, session.phase());
     second_held.deinit(std.testing.allocator);
 
-    var logged_off = try session.step(timestamp(20 * std.time.ns_per_s), .timer);
+    var logged_off = try session.step(timestamp(20 * std.time.ns_per_s), timerInput(&session));
     defer logged_off.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.logoff, logged_off.phase);
     try std.testing.expectEqual(FailureReason.server_failure, logged_off.failure.?);
@@ -870,12 +1098,12 @@ test "Session distinguishes authentication timeout and retries connecting" {
     });
     try prepareChallengeSession(&auth_session);
 
-    var auth_held = try auth_session.step(timestamp(35 * std.time.ns_per_s), .timer);
+    var auth_held = try auth_session.step(timestamp(35 * std.time.ns_per_s), timerInput(&auth_session));
     defer auth_held.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.held, auth_held.phase);
     try std.testing.expectEqual(FailureReason.auth_timeout, auth_held.failure.?);
 
-    var retried = try auth_session.step(timestamp(40 * std.time.ns_per_s), .timer);
+    var retried = try auth_session.step(timestamp(40 * std.time.ns_per_s), timerInput(&auth_session));
     defer retried.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.connecting, retried.phase);
     try std.testing.expectEqual(@as(?FailureReason, null), retried.failure);
@@ -888,11 +1116,11 @@ test "Session distinguishes authentication timeout and retries connecting" {
     });
     var started = try start_session.step(timestamp(0), .start);
     started.deinit(std.testing.allocator);
-    var start_retry = try start_session.step(timestamp(10 * std.time.ns_per_s), .timer);
+    var start_retry = try start_session.step(timestamp(10 * std.time.ns_per_s), timerInput(&start_session));
     start_retry.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.connecting, start_session.phase());
 
-    var start_held = try start_session.step(timestamp(20 * std.time.ns_per_s), .timer);
+    var start_held = try start_session.step(timestamp(20 * std.time.ns_per_s), timerInput(&start_session));
     defer start_held.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.held, start_held.phase);
     try std.testing.expectEqual(FailureReason.start_timeout, start_held.failure.?);
@@ -925,7 +1153,7 @@ test "Session cancellation and server Logoff terminate without duplicate cleanup
     );
     var remote_logoff = try canceled_session.step(
         timestamp(3 * std.time.ns_per_s),
-        .{ .frame = &remote_logoff_frame },
+        frameInput(&canceled_session, &remote_logoff_frame),
     );
     defer remote_logoff.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.logoff, remote_logoff.phase);
@@ -961,18 +1189,18 @@ test "Session rejects stale and duplicate frames without changing state" {
     peap_frame[eapol.header_size..].* = .{ 1, 0x16, 0, 5, 25 };
     try std.testing.expectError(
         error.UnsupportedEapMethod,
-        session.step(timestamp(std.time.ns_per_s), .{ .frame = &peap_frame }),
+        session.step(timestamp(std.time.ns_per_s), frameInput(&session, &peap_frame)),
     );
     try std.testing.expectEqual(Phase.connecting, session.phase());
 
     const identity = identityRequest(0x16);
-    var acquired = try session.step(timestamp(std.time.ns_per_s), .{ .frame = &identity });
+    var acquired = try session.step(timestamp(std.time.ns_per_s), frameInput(&session, &identity));
     acquired.deinit(std.testing.allocator);
     const deadline = session.nextDeadline();
 
     try std.testing.expectError(
         error.DuplicateFrame,
-        session.step(timestamp(2 * std.time.ns_per_s), .{ .frame = &identity }),
+        session.step(timestamp(2 * std.time.ns_per_s), frameInput(&session, &identity)),
     );
     try std.testing.expectEqual(Phase.acquired, session.phase());
     try std.testing.expectEqual(deadline, session.nextDeadline());
@@ -980,14 +1208,14 @@ test "Session rejects stale and duplicate frames without changing state" {
     const old_identity = identityRequest(0x15);
     try std.testing.expectError(
         error.StaleIdentifier,
-        session.step(timestamp(2 * std.time.ns_per_s), .{ .frame = &old_identity }),
+        session.step(timestamp(2 * std.time.ns_per_s), frameInput(&session, &old_identity)),
     );
     try std.testing.expectEqual(Phase.acquired, session.phase());
 
     const success = terminalRequest(.success, 0x16);
     try std.testing.expectError(
         error.InvalidState,
-        session.step(timestamp(2 * std.time.ns_per_s), .{ .frame = &success }),
+        session.step(timestamp(2 * std.time.ns_per_s), frameInput(&session, &success)),
     );
     try std.testing.expectEqual(Phase.acquired, session.phase());
 
@@ -1005,7 +1233,7 @@ test "Session rejects stale and duplicate frames without changing state" {
 
     try std.testing.expectError(
         error.TimeWentBackwards,
-        session.step(timestamp(0), .timer),
+        session.step(timestamp(0), timerInput(&session)),
     );
 }
 
@@ -1020,7 +1248,7 @@ test "Session performs DHCP second authentication before reporting success" {
     const first_success = terminalRequest(.success, 0x17);
     var waiting_for_dhcp = try session.step(
         timestamp(5 * std.time.ns_per_s),
-        .{ .frame = &first_success },
+        frameInput(&session, &first_success),
     );
     defer waiting_for_dhcp.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.authenticating, waiting_for_dhcp.phase);
@@ -1029,42 +1257,55 @@ test "Session performs DHCP second authentication before reporting success" {
 
     try std.testing.expectError(
         error.DuplicateFrame,
-        session.step(timestamp(6 * std.time.ns_per_s), .{ .frame = &first_success }),
+        session.step(timestamp(6 * std.time.ns_per_s), frameInput(&session, &first_success)),
     );
     try std.testing.expectEqual(Phase.authenticating, session.phase());
     try std.testing.expectEqual(timestamp(7 * std.time.ns_per_s), session.nextDeadline().?);
 
-    var incomplete_lease = try session.step(timestamp(6 * std.time.ns_per_s), .{
-        .external_result = .{ .dhcp_lease = .{ .ip = .{ 192, 0, 2, 10 } } },
-    });
+    var incomplete_lease = try session.step(timestamp(6 * std.time.ns_per_s), externalResultInput(
+        &session,
+        .{ .dhcp_lease = .{ .ip = .{ 192, 0, 2, 10 } } },
+    ));
     defer incomplete_lease.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.authenticating, incomplete_lease.phase);
     try std.testing.expectEqual(@as(usize, 0), incomplete_lease.actions.len);
 
-    var polled_again = try session.step(timestamp(7 * std.time.ns_per_s), .timer);
+    var polled_again = try session.step(timestamp(7 * std.time.ns_per_s), timerInput(&session));
     defer polled_again.deinit(std.testing.allocator);
     try std.testing.expectEqual(Action.poll_dhcp, polled_again.actions[0]);
 
-    var second_cycle = try session.step(timestamp(8 * std.time.ns_per_s), .{
-        .external_result = .{ .dhcp_lease = .{
+    const first_cycle_generation = session.currentGeneration();
+    var second_cycle = try session.step(timestamp(8 * std.time.ns_per_s), externalResultInput(
+        &session,
+        .{ .dhcp_lease = .{
             .ip = .{ 192, 0, 2, 10 },
             .gateway = .{ 192, 0, 2, 1 },
         } },
-    });
+    ));
     defer second_cycle.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.connecting, second_cycle.phase);
     try std.testing.expectEqual(DhcpStep.second, session.dhcpStep());
     try std.testing.expectEqual(@as(usize, 1), second_cycle.actions.len);
 
     const second_identity = identityRequest(0x18);
-    var acquired = try session.step(timestamp(9 * std.time.ns_per_s), .{ .frame = &second_identity });
+    try std.testing.expectError(
+        error.StaleGeneration,
+        session.step(timestamp(9 * std.time.ns_per_s), .{ .external_result = .{
+            .generation = first_cycle_generation,
+            .result = .{ .dhcp_lease = .{
+                .ip = .{ 198, 51, 100, 20 },
+                .gateway = .{ 198, 51, 100, 1 },
+            } },
+        } }),
+    );
+    var acquired = try session.step(timestamp(9 * std.time.ns_per_s), frameInput(&session, &second_identity));
     acquired.deinit(std.testing.allocator);
     var identified = try session.step(timestamp(10 * std.time.ns_per_s), .{
         .credentials = .{ .username = "alice", .password = "" },
     });
     identified.deinit(std.testing.allocator);
     const second_challenge = md5ChallengeRequest(0x19);
-    var challenged = try session.step(timestamp(11 * std.time.ns_per_s), .{ .frame = &second_challenge });
+    var challenged = try session.step(timestamp(11 * std.time.ns_per_s), frameInput(&session, &second_challenge));
     challenged.deinit(std.testing.allocator);
     var answered = try session.step(timestamp(12 * std.time.ns_per_s), .{
         .credentials = .{ .username = "alice", .password = "" },
@@ -1072,7 +1313,7 @@ test "Session performs DHCP second authentication before reporting success" {
     answered.deinit(std.testing.allocator);
 
     const second_success = terminalRequest(.success, 0x19);
-    var authenticated = try session.step(timestamp(13 * std.time.ns_per_s), .{ .frame = &second_success });
+    var authenticated = try session.step(timestamp(13 * std.time.ns_per_s), frameInput(&session, &second_success));
     defer authenticated.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.authenticated, authenticated.phase);
     try std.testing.expectEqual(@as(?std.Io.Timestamp, null), authenticated.next_deadline);
@@ -1086,19 +1327,19 @@ test "Session terminates with a distinct DHCP timeout after 21 polls" {
     try prepareChallengeSession(&session);
 
     const success = terminalRequest(.success, 0x17);
-    var first_poll = try session.step(timestamp(5 * std.time.ns_per_s), .{ .frame = &success });
+    var first_poll = try session.step(timestamp(5 * std.time.ns_per_s), frameInput(&session, &success));
     first_poll.deinit(std.testing.allocator);
 
     var now: i96 = 7 * std.time.ns_per_s;
     for (2..22) |attempt| {
-        var poll = try session.step(timestamp(now), .timer);
+        var poll = try session.step(timestamp(now), timerInput(&session));
         poll.deinit(std.testing.allocator);
         try std.testing.expectEqual(Phase.authenticating, session.phase());
         try std.testing.expectEqual(@as(u8, @intCast(attempt)), session.dhcpPollAttempts());
         now += 2 * std.time.ns_per_s;
     }
 
-    var timed_out = try session.step(timestamp(now), .timer);
+    var timed_out = try session.step(timestamp(now), timerInput(&session));
     defer timed_out.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.logoff, timed_out.phase);
     try std.testing.expectEqual(FailureReason.dhcp_timeout, timed_out.failure.?);
@@ -1114,7 +1355,7 @@ test "Session allocation failures do not commit partial authentication state" {
     started.deinit(failing.allocator());
 
     const identity = identityRequest(0x16);
-    var acquired = try session.step(timestamp(std.time.ns_per_s), .{ .frame = &identity });
+    var acquired = try session.step(timestamp(std.time.ns_per_s), frameInput(&session, &identity));
     acquired.deinit(failing.allocator());
     const deadline = session.nextDeadline();
 
@@ -1136,7 +1377,7 @@ test "Session allocation failures do not commit partial authentication state" {
     try std.testing.expectEqual(Phase.acquired, session.phase());
 
     const challenge = md5ChallengeRequest(0x17);
-    var challenged = try session.step(timestamp(3 * std.time.ns_per_s), .{ .frame = &challenge });
+    var challenged = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &challenge));
     challenged.deinit(failing.allocator());
     const challenge_deadline = session.nextDeadline();
 
@@ -1168,7 +1409,7 @@ test "Session acknowledges Notification and responds to Credential requests" {
     var notification_frame: [eapol.header_size + 5]u8 = undefined;
     @memcpy(notification_frame[0..eapol.header_size], &eapolHeader(.eap, 5));
     notification_frame[eapol.header_size..].* = .{ 1, 0x16, 0, 5, 2 };
-    var notified = try session.step(timestamp(std.time.ns_per_s), .{ .frame = &notification_frame });
+    var notified = try session.step(timestamp(std.time.ns_per_s), frameInput(&session, &notification_frame));
     defer notified.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.connecting, notified.phase);
     const notification_response = try eapol.decode(notified.actions[0].send_frame);
@@ -1179,7 +1420,7 @@ test "Session acknowledges Notification and responds to Credential requests" {
     var credential_frame: [eapol.header_size + 5]u8 = undefined;
     @memcpy(credential_frame[0..eapol.header_size], &eapolHeader(.eap, 5));
     credential_frame[eapol.header_size..].* = .{ 1, 0x17, 0, 5, 7 };
-    var credential_request = try session.step(timestamp(2 * std.time.ns_per_s), .{ .frame = &credential_frame });
+    var credential_request = try session.step(timestamp(2 * std.time.ns_per_s), frameInput(&session, &credential_frame));
     defer credential_request.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.authenticating, credential_request.phase);
     try std.testing.expectEqual(

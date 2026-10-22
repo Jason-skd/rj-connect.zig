@@ -43,7 +43,7 @@
 ## M1: 离线协议与密码学基础
 
 - 状态：已完成
-- 提交：`244a354`
+- 提交：`f0245e9`
 
 ### 目标
 
@@ -129,7 +129,7 @@
 - 绝对时间使用 `std.Io.Timestamp`，时长使用 `std.Io.Duration`。时间倒退返回明确错误。
 - `Session.init` 显式接收 allocator。`step` 返回拥有动作和报文字节的 `Outcome`，调用方通过 `Outcome.deinit` 释放。
 - 分配失败不得提交部分状态；完整生成并校验本次结果后，才更新内部状态。
-- 输入使用统一事件联合，包含 `frame`、`timer`、`credentials`、`tunnel_input` 和 `external_result`。借用字节不跨调用保存。
+- 输入使用统一事件联合，包含 `frame`、`timer`、`credentials` 和 `external_result`。异步输入携带当前尝试代次，借用字节不跨调用保存。
 - 凭据通过 `credentials` 事件按需提供。库不持久化密码，不调用凭据 provider。
 - DHCP 轮询 `2s × 21` 和 DHCP 结果 `9s` 等协议行为由引擎实现；start、auth、held 超时和重试上限由 `Config` 提供。
 - 默认采用严格模式：旧 identifier、重复事件和状态不允许的帧返回可区分错误，不改变会话。

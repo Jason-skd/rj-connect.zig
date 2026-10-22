@@ -2,7 +2,7 @@
 
 ## 项目概览
 
-本仓库提供一个 Zig 库，用于实现锐捷校园网认证所需的确定性协议引擎。库负责报文与字段编解码、认证状态转换、定时截止时间、待发送动作、直接通信分片重组和密码学原语。
+本仓库提供一个 Zig 库，用于实现锐捷校园网认证所需的确定性协议引擎。当前库负责报文与字段编解码、认证状态转换、定时截止时间、待发送动作和密码学原语。
 
 本库不创建 socket、不发送链路层报文、不读取系统时钟、不管理凭据，也不实现 TLS。调用方负责驱动网络 I/O、时钟、随机数、TLS、凭据和平台状态，并根据库返回的动作完成实际发送。
 
@@ -21,14 +21,14 @@ zig build test
 ```zig
 const rj = @import("mentohust_zig");
 
-var session = try rj.protocol.session.Session.init(allocator, .{
+var session = try rj.session.Session.init(allocator, .{
     .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
 });
 var outcome = try session.step(now, .start);
 defer outcome.deinit(allocator);
 ```
 
-`protocol.eapol` 提供报文 codec，`protocol.session` 提供 EAP-MD5 认证与 DHCP 第二认证状态。发送动作中的帧由 `Outcome` 拥有，调用方完成发送后应释放。
+`protocol.eapol` 提供报文 codec，`session` 提供 EAP-MD5 认证与 DHCP 第二认证状态。发送动作中的帧由 `Outcome` 拥有，调用方完成发送后应释放。收到帧、定时器或外部结果时，调用方必须携带当前尝试的 `Generation`；旧代次事件返回 `error.StaleGeneration`。
 
 ## 开发验证
 

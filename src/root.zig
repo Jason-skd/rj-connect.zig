@@ -5,6 +5,9 @@ const Io = std.Io;
 /// Protocol types and codecs shared by clients and tests.
 pub const protocol = @import("protocol/root.zig");
 
+/// Deterministic protocol session orchestration.
+pub const session = @import("session/session.zig");
+
 /// This is a documentation comment to explain the `printAnotherMessage` function below.
 ///
 /// Accepting an `Io.Writer` instance is a handy way to write reusable code.
@@ -18,6 +21,12 @@ pub fn add(a: i32, b: i32) i32 {
 
 test {
     _ = protocol;
+    _ = session;
+}
+
+test "session is exposed from the package root" {
+    _ = session.Session;
+    _ = session.Generation;
 }
 
 test "basic add functionality" {
