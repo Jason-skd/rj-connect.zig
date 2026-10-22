@@ -27,11 +27,30 @@ const TimestampState = union(enum) {
     },
 };
 
-const Pending = struct {
-    id: u32,
-    encrypted: []u8,
+const TimestampUpdate = struct {
+    timestamp: u64,
+    state: TimestampState,
+};
+
+const Fragment = struct {
+    offset: usize,
+    len: usize,
     flags: u8,
-    total_len: u32,
+};
+
+const Outbound = struct {
+    encrypted: []u8,
+    total_len: usize,
+    offset: usize,
+    current_len: usize,
+    current_flags: u8,
+    current_id: u32,
+    attempts: u8,
+};
+
+const PreparedFragment = struct {
+    frame: []u8,
+    timestamps: TimestampState,
 };
 
 pub const Machine = struct {
@@ -41,7 +60,7 @@ pub const Machine = struct {
     generation: types.Generation,
     timestamps: TimestampState,
     next_message_id: u32,
-    pending: ?Pending = null,
+    outbound: ?Outbound = null,
     ack_deadline: ?std.Io.Timestamp = null,
 
     pub fn init(
@@ -78,7 +97,7 @@ pub const Machine = struct {
 
     pub fn deinit(self: *Machine) void {
         self.allocator.free(self.config.username_gbk);
-        if (self.pending) |pending| self.allocator.free(pending.encrypted);
+        if (self.outbound) |outbound| self.allocator.free(outbound.encrypted);
         self.* = undefined;
     }
 
@@ -105,26 +124,51 @@ pub const Machine = struct {
             payload,
         );
         errdefer self.allocator.free(encrypted);
+        return self.beginMessage(encrypted, now);
+    }
 
-        const timestamp = try self.nextSendTimestamp(now);
+    pub fn step(self: *Machine, now: std.Io.Timestamp, input: Input) Error!Outcome {
+        return switch (input) {
+            .frame => |event| self.handleFrame(now, event.bytes),
+            .timer => |generation| {
+                if (!generation.eql(self.generation)) return error.StaleGeneration;
+                return self.handleTimer(now);
+            },
+            else => error.InvalidState,
+        };
+    }
+
+    fn beginMessage(
+        self: *Machine,
+        encrypted: []u8,
+        now: std.Io.Timestamp,
+    ) Error!Outcome {
+        const fragment = fragmentAt(encrypted.len, 0);
         const id = self.next_message_id;
-        const frame = try self.makeFrame(
-            id,
-            1,
-            @intCast(encrypted.len),
-            timestamp,
+        const prepared = try self.prepareFragment(
             encrypted,
+            fragment,
+            id,
+            self.timestamps,
+            now,
         );
+        errdefer self.allocator.free(prepared.frame);
+
         var builder = OutcomeBuilder.init(self.allocator);
         errdefer builder.deinit();
-        try builder.addFrame(frame);
+        try builder.addFrame(prepared.frame);
         const actions = try builder.finish();
 
-        self.pending = .{
-            .id = id,
+        self.timestamps = prepared.timestamps;
+        self.next_message_id +%= 1;
+        self.outbound = .{
             .encrypted = encrypted,
-            .flags = 1,
-            .total_len = @intCast(encrypted.len),
+            .total_len = encrypted.len,
+            .offset = 0,
+            .current_len = fragment.len,
+            .current_flags = fragment.flags,
+            .current_id = id,
+            .attempts = 1,
         };
         self.ack_deadline = try time.addDuration(now, self.config.ack_timeout);
         return .{
@@ -134,13 +178,6 @@ pub const Machine = struct {
             .next_deadline = self.ack_deadline,
             .failure = null,
             .generation = self.generation,
-        };
-    }
-
-    pub fn step(self: *Machine, now: std.Io.Timestamp, input: Input) Error!Outcome {
-        return switch (input) {
-            .frame => |event| self.handleFrame(now, event.bytes),
-            else => error.InvalidState,
         };
     }
 
@@ -164,8 +201,8 @@ pub const Machine = struct {
             return self.noop();
         }
 
-        const pending = self.pending orelse return self.noop();
-        if (pending.id != frame.header.id) return self.noop();
+        const outbound = self.outbound orelse return self.noop();
+        if (outbound.current_id != frame.header.id) return self.noop();
 
         const packet = bytes[wire.ethernet_header_size + wire.ipv4_header_size + wire.udp_header_size ..];
         const valid_authenticator = wire.verifyAuthenticator(
@@ -173,23 +210,141 @@ pub const Machine = struct {
             self.config.des_key,
             self.config.initial_iv,
         ) catch false;
-        if (!valid_authenticator or !try self.acceptTimestamp(now, frame.header.timestamp)) {
-            return self.noop();
+        if (!valid_authenticator) return self.noop();
+
+        const timestamp_update = try validateReceivedTimestamp(
+            self.timestamps,
+            now,
+            frame.header.timestamp,
+        );
+        if (!timestamp_update.accepted) return self.noop();
+
+        const next_offset = outbound.offset + outbound.current_len;
+        if (next_offset == outbound.total_len) {
+            const actions = try self.allocator.alloc(Action, 0);
+            errdefer self.allocator.free(actions);
+            self.timestamps = timestamp_update.state;
+            self.allocator.free(outbound.encrypted);
+            self.outbound = null;
+            self.ack_deadline = null;
+            return .{
+                .actions = actions,
+                .previous_phase = .{ .direct = self.phase },
+                .phase = .{ .direct = self.phase },
+                .next_deadline = null,
+                .failure = null,
+                .generation = self.generation,
+            };
         }
 
-        const actions = try self.allocator.alloc(Action, 0);
-        errdefer self.allocator.free(actions);
-        self.allocator.free(pending.encrypted);
-        self.pending = null;
-        self.ack_deadline = null;
+        const fragment = fragmentAt(outbound.total_len, next_offset);
+        const id = self.next_message_id;
+        const prepared = try self.prepareFragment(
+            outbound.encrypted,
+            fragment,
+            id,
+            timestamp_update.state,
+            now,
+        );
+        errdefer self.allocator.free(prepared.frame);
+        var builder = OutcomeBuilder.init(self.allocator);
+        errdefer builder.deinit();
+        try builder.addFrame(prepared.frame);
+        const actions = try builder.finish();
+
+        self.timestamps = prepared.timestamps;
         self.next_message_id +%= 1;
+        self.outbound = .{
+            .encrypted = outbound.encrypted,
+            .total_len = outbound.total_len,
+            .offset = next_offset,
+            .current_len = fragment.len,
+            .current_flags = fragment.flags,
+            .current_id = id,
+            .attempts = 1,
+        };
+        self.ack_deadline = try time.addDuration(now, self.config.ack_timeout);
         return .{
             .actions = actions,
             .previous_phase = .{ .direct = self.phase },
             .phase = .{ .direct = self.phase },
-            .next_deadline = null,
+            .next_deadline = self.ack_deadline,
             .failure = null,
             .generation = self.generation,
+        };
+    }
+
+    fn handleTimer(self: *Machine, now: std.Io.Timestamp) Error!Outcome {
+        const deadline = self.ack_deadline orelse return error.InvalidState;
+        if (now.compare(.lt, deadline)) return error.TimerNotDue;
+        const outbound = self.outbound orelse return error.InvalidState;
+
+        if (outbound.attempts >= self.config.max_send_attempts) {
+            const actions = try self.allocator.alloc(Action, 0);
+            errdefer self.allocator.free(actions);
+            self.allocator.free(outbound.encrypted);
+            self.outbound = null;
+            self.ack_deadline = null;
+            return .{
+                .actions = actions,
+                .previous_phase = .{ .direct = self.phase },
+                .phase = .idle,
+                .next_deadline = null,
+                .failure = .direct_send_failed,
+                .generation = self.generation,
+            };
+        }
+
+        const fragment: Fragment = .{
+            .offset = outbound.offset,
+            .len = outbound.current_len,
+            .flags = outbound.current_flags,
+        };
+        const prepared = try self.prepareFragment(
+            outbound.encrypted,
+            fragment,
+            outbound.current_id,
+            self.timestamps,
+            now,
+        );
+        errdefer self.allocator.free(prepared.frame);
+        var builder = OutcomeBuilder.init(self.allocator);
+        errdefer builder.deinit();
+        try builder.addFrame(prepared.frame);
+        const actions = try builder.finish();
+
+        self.timestamps = prepared.timestamps;
+        self.outbound.?.attempts += 1;
+        self.ack_deadline = try time.addDuration(now, self.config.ack_timeout);
+        return .{
+            .actions = actions,
+            .previous_phase = .{ .direct = self.phase },
+            .phase = .{ .direct = self.phase },
+            .next_deadline = self.ack_deadline,
+            .failure = null,
+            .generation = self.generation,
+        };
+    }
+
+    fn prepareFragment(
+        self: *Machine,
+        encrypted: []const u8,
+        fragment: Fragment,
+        id: u32,
+        timestamps: TimestampState,
+        now: std.Io.Timestamp,
+    ) Error!PreparedFragment {
+        const timestamp_update = try nextSendTimestamp(timestamps, now);
+        const frame = try self.makeFrame(
+            id,
+            fragment.flags,
+            @intCast(encrypted.len),
+            timestamp_update.timestamp,
+            encrypted[fragment.offset..][0..fragment.len],
+        );
+        return .{
+            .frame = frame,
+            .timestamps = timestamp_update.state,
         };
     }
 
@@ -245,51 +400,77 @@ pub const Machine = struct {
         ) catch return error.InvalidConfig;
         return frame;
     }
-
-    fn nextSendTimestamp(self: *Machine, now: std.Io.Timestamp) Error!u64 {
-        return switch (self.timestamps) {
-            .server => |*state| blk: {
-                const elapsed = now.nanoseconds - state.local_anchor.nanoseconds;
-                if (elapsed < 0) return error.TimeWentBackwards;
-                const seconds: u64 = @intCast(@divFloor(elapsed, std.time.ns_per_s));
-                break :blk std.math.add(u64, state.server_anchor, seconds) catch
-                    return error.TimestampOverflow;
-            },
-            .monotonic => |*state| blk: {
-                const result = state.next_send;
-                state.next_send = std.math.add(u64, state.next_send, 1) catch
-                    return error.TimestampOverflow;
-                break :blk result;
-            },
-        };
-    }
-
-    fn acceptTimestamp(self: *Machine, now: std.Io.Timestamp, received: u64) Error!bool {
-        return switch (self.timestamps) {
-            .server => |*state| blk: {
-                const elapsed = now.nanoseconds - state.local_anchor.nanoseconds;
-                if (elapsed < 0) return error.TimeWentBackwards;
-                const seconds: u64 = @intCast(@divFloor(elapsed, std.time.ns_per_s));
-                const expected = std.math.add(u64, state.server_anchor, seconds) catch
-                    return error.TimestampOverflow;
-                const distance = if (received >= expected) received - expected else expected - received;
-                if (distance >= 61) break :blk false;
-                state.received = received;
-                break :blk true;
-            },
-            .monotonic => |*state| blk: {
-                if (received > state.received) {
-                    state.received = received;
-                    state.non_advancing = 0;
-                    break :blk true;
-                }
-                if (state.non_advancing >= 5) break :blk false;
-                state.non_advancing += 1;
-                break :blk true;
-            },
-        };
-    }
 };
+
+fn nextSendTimestamp(
+    state: TimestampState,
+    now: std.Io.Timestamp,
+) Error!TimestampUpdate {
+    var next = state;
+    return switch (next) {
+        .server => |*server| blk: {
+            const elapsed = now.nanoseconds - server.local_anchor.nanoseconds;
+            if (elapsed < 0) return error.TimeWentBackwards;
+            const seconds: u64 = @intCast(@divFloor(elapsed, std.time.ns_per_s));
+            const timestamp = std.math.add(u64, server.server_anchor, seconds) catch
+                return error.TimestampOverflow;
+            break :blk .{ .timestamp = timestamp, .state = next };
+        },
+        .monotonic => |*monotonic| blk: {
+            const timestamp = monotonic.next_send;
+            monotonic.next_send = std.math.add(u64, monotonic.next_send, 1) catch
+                return error.TimestampOverflow;
+            break :blk .{ .timestamp = timestamp, .state = next };
+        },
+    };
+}
+
+fn validateReceivedTimestamp(
+    state: TimestampState,
+    now: std.Io.Timestamp,
+    received: u64,
+) Error!struct { accepted: bool, state: TimestampState } {
+    var next = state;
+    return switch (next) {
+        .server => |*server| blk: {
+            const elapsed = now.nanoseconds - server.local_anchor.nanoseconds;
+            if (elapsed < 0) return error.TimeWentBackwards;
+            const seconds: u64 = @intCast(@divFloor(elapsed, std.time.ns_per_s));
+            const expected = std.math.add(u64, server.server_anchor, seconds) catch
+                return error.TimestampOverflow;
+            const distance = if (received >= expected) received - expected else expected - received;
+            if (distance >= 61) break :blk .{ .accepted = false, .state = state };
+            server.received = received;
+            break :blk .{ .accepted = true, .state = next };
+        },
+        .monotonic => |*monotonic| blk: {
+            if (received > monotonic.received) {
+                monotonic.received = received;
+                monotonic.non_advancing = 0;
+                break :blk .{ .accepted = true, .state = next };
+            }
+            if (monotonic.non_advancing >= 5) {
+                break :blk .{ .accepted = false, .state = state };
+            }
+            monotonic.non_advancing += 1;
+            break :blk .{ .accepted = true, .state = next };
+        },
+    };
+}
+
+fn fragmentAt(total_len: usize, offset: usize) Fragment {
+    const remaining = total_len - offset;
+    const len = @min(remaining, wire.max_encrypted_chunk);
+    const flags: u8 = if (offset == 0 and len == total_len)
+        1
+    else if (offset == 0)
+        2
+    else if (offset + len == total_len)
+        4
+    else
+        3;
+    return .{ .offset = offset, .len = len, .flags = flags };
+}
 
 fn makeSamHandshake(
     allocator: std.mem.Allocator,
@@ -339,4 +520,127 @@ fn encryptPayload(
     errdefer allocator.free(encrypted);
     _ = des.encryptCbc(key, iv, padded, encrypted) catch return error.InvalidConfig;
     return encrypted;
+}
+
+test "Direct fragments a message in strict flag order" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    const encrypted = try std.testing.allocator.alloc(u8, 3008);
+    @memset(encrypted, 0x5a);
+    var outcome = try machine.beginMessage(encrypted, testTimestamp(0));
+
+    const expected_flags = [_]u8{ 2, 3, 4 };
+    for (expected_flags, 0..) |expected_flag, index| {
+        try std.testing.expectEqual(@as(usize, 1), outcome.actions.len);
+        const frame = try wire.decodeFrame(outcome.actions[0].send_frame);
+        try std.testing.expectEqual(expected_flag, frame.header.flags);
+        try std.testing.expectEqual(@as(u32, 3008), frame.header.total_len);
+
+        var ack_buffer: [256]u8 = undefined;
+        const ack = try encodeAckForFrame(&ack_buffer, frame, config);
+        outcome.deinit(std.testing.allocator);
+        outcome = try machine.step(
+            testTimestamp((index + 1) * std.time.ns_per_s),
+            .{ .frame = .{
+                .generation = machine.currentGeneration(),
+                .bytes = ack,
+            } },
+        );
+    }
+    outcome.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), machine.nextDeadline());
+}
+
+test "Direct retransmits the same fragment until attempts are exhausted" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    const encrypted = try std.testing.allocator.alloc(u8, 100);
+    @memset(encrypted, 0x33);
+    var initial = try machine.beginMessage(encrypted, testTimestamp(0));
+    const initial_frame = try wire.decodeFrame(initial.actions[0].send_frame);
+
+    try std.testing.expectError(error.TimerNotDue, machine.step(
+        testTimestamp(2 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    ));
+    var retry = try machine.step(
+        testTimestamp(3 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    const retried_frame = try wire.decodeFrame(retry.actions[0].send_frame);
+    try std.testing.expectEqual(initial_frame.header.id, retried_frame.header.id);
+    try std.testing.expectEqual(initial_frame.header.flags, retried_frame.header.flags);
+    try std.testing.expectEqualSlices(u8, initial_frame.encrypted, retried_frame.encrypted);
+    try std.testing.expect(initial_frame.header.timestamp != retried_frame.header.timestamp);
+    initial.deinit(std.testing.allocator);
+    retry.deinit(std.testing.allocator);
+
+    var final_attempt = try machine.step(
+        testTimestamp(6 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    final_attempt.deinit(std.testing.allocator);
+
+    var failed = try machine.step(
+        testTimestamp(9 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    defer failed.deinit(std.testing.allocator);
+    try std.testing.expectEqual(types.ActivePhase.idle, failed.phase);
+    try std.testing.expectEqual(types.FailureReason.direct_send_failed, failed.failure.?);
+    try std.testing.expectEqual(@as(usize, 0), failed.actions.len);
+}
+
+fn testConfig() types.DirectSessionConfig {
+    return .{
+        .mode = .{ .sam = .{
+            .session_parameter = .{ 1, 2, 3, 4 },
+            .endpoint_parameter = .{ 5, 6, 7, 8, 9, 10 },
+        } },
+        .peer_mac = .{ 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb },
+        .peer_ipv4 = .{ 192, 0, 2, 1 },
+        .peer_udp_port = 5678,
+        .local_udp_port = 1234,
+        .session_id = 0x1122_3344,
+        .des_key = .{ 0, 1, 2, 3, 4, 5, 6, 7 },
+        .initial_iv = .{ 8, 9, 10, 11, 12, 13, 14, 15 },
+        .timestamp = .{ .monotonic = 100 },
+        .username_gbk = "alice",
+        .network = .{
+            .ipv4 = .{ 192, 0, 2, 10 },
+            .netmask = .{ 255, 255, 255, 0 },
+            .gateway = .{ 192, 0, 2, 1 },
+            .dns = .{ 203, 0, 113, 53 },
+            .mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        },
+    };
+}
+
+fn encodeAckForFrame(
+    output: []u8,
+    frame: wire.DecodedFrame,
+    config: types.DirectSessionConfig,
+) ![]u8 {
+    const encoded = try wire.encodeFrame(.{
+        .version = 1,
+        .code = 2,
+        .id = frame.header.id,
+        .packet_len = wire.header_size,
+        .authenticator = @splat(0),
+        .session_id = frame.header.session_id,
+        .timestamp = frame.header.timestamp,
+        .message_type = 1,
+        .flags = 0,
+        .total_len = 0,
+    }, &.{}, frame.destination, frame.source, output);
+    try wire.setAuthenticator(encoded, config.des_key, config.initial_iv);
+    return encoded;
+}
+
+fn testTimestamp(nanoseconds: i96) std.Io.Timestamp {
+    return .fromNanoseconds(nanoseconds);
 }

@@ -75,6 +75,7 @@ pub const FailureReason = enum {
     canceled,
     dhcp_timeout,
     server_logoff,
+    direct_send_failed,
 };
 
 pub const DhcpStep = enum(u8) {

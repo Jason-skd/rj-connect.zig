@@ -182,6 +182,10 @@ pub const Session = struct {
                 self.context.generation = engine.currentGeneration();
                 self.context.last_now = now;
                 self.failure_reason = result.failure;
+                if (result.phase == .idle) {
+                    engine.deinit();
+                    self.machine = .empty;
+                }
                 return result;
             },
         };
