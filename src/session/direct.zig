@@ -3,6 +3,7 @@
 const std = @import("std");
 const des = @import("../protocol/des.zig");
 const wire = @import("../protocol/direct.zig");
+const reassembly = @import("reassembly.zig");
 const session_outcome = @import("outcome.zig");
 const time = @import("time.zig");
 const types = @import("types.zig");
@@ -62,6 +63,8 @@ pub const Machine = struct {
     next_message_id: u32,
     outbound: ?Outbound = null,
     ack_deadline: ?std.Io.Timestamp = null,
+    reassembler: reassembly.Reassembler,
+    received_payload: ?[]u8 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -92,12 +95,15 @@ pub const Machine = struct {
                 } },
             },
             .next_message_id = config.next_message_id,
+            .reassembler = reassembly.Reassembler.init(allocator, config.max_message_size),
         };
     }
 
     pub fn deinit(self: *Machine) void {
         self.allocator.free(self.config.username_gbk);
         if (self.outbound) |outbound| self.allocator.free(outbound.encrypted);
+        if (self.received_payload) |payload| self.allocator.free(payload);
+        self.reassembler.deinit();
         self.* = undefined;
     }
 
@@ -110,7 +116,7 @@ pub const Machine = struct {
     }
 
     pub fn nextDeadline(self: *const Machine) ?std.Io.Timestamp {
-        return self.ack_deadline;
+        return minimumDeadline(self.ack_deadline, self.reassembler.nextDeadline());
     }
 
     pub fn start(self: *Machine, now: std.Io.Timestamp) Error!Outcome {
@@ -175,7 +181,7 @@ pub const Machine = struct {
             .actions = actions,
             .previous_phase = .{ .direct = .initializing },
             .phase = .{ .direct = self.phase },
-            .next_deadline = self.ack_deadline,
+            .next_deadline = self.nextDeadline(),
             .failure = null,
             .generation = self.generation,
         };
@@ -187,19 +193,11 @@ pub const Machine = struct {
         bytes: []const u8,
     ) Error!Outcome {
         const frame = wire.decodeFrame(bytes) catch return self.noop();
-        if (frame.header.code != 2 or
-            frame.header.packet_len != wire.header_size or
+        if (!self.matchesEndpoints(frame)) return self.noop();
+        if (frame.header.code == 1) return self.handleData(now, frame, bytes);
+        if (frame.header.packet_len != wire.header_size or
             frame.header.total_len != 0 or
-            frame.header.session_id != self.config.session_id or
-            !std.mem.eql(u8, &frame.source.mac, &self.config.peer_mac) or
-            !std.mem.eql(u8, &frame.destination.mac, &self.config.network.mac) or
-            frame.source.port != self.config.peer_udp_port or
-            frame.destination.port != self.config.local_udp_port or
-            !std.mem.eql(u8, &frame.source.ip, &self.config.peer_ipv4) or
-            !std.mem.eql(u8, &frame.destination.ip, &self.config.network.ipv4))
-        {
-            return self.noop();
-        }
+            frame.header.code != 2) return self.noop();
 
         const outbound = self.outbound orelse return self.noop();
         if (outbound.current_id != frame.header.id) return self.noop();
@@ -268,15 +266,152 @@ pub const Machine = struct {
             .actions = actions,
             .previous_phase = .{ .direct = self.phase },
             .phase = .{ .direct = self.phase },
-            .next_deadline = self.ack_deadline,
+            .next_deadline = self.nextDeadline(),
             .failure = null,
             .generation = self.generation,
         };
     }
 
+    fn handleData(
+        self: *Machine,
+        now: std.Io.Timestamp,
+        frame: wire.DecodedFrame,
+        bytes: []const u8,
+    ) Error!Outcome {
+        if (frame.header.message_type != 1 or frame.encrypted.len > wire.max_encrypted_chunk) {
+            return self.noop();
+        }
+
+        const packet = bytes[wire.ethernet_header_size + wire.ipv4_header_size + wire.udp_header_size ..];
+        const valid_authenticator = wire.verifyAuthenticator(
+            packet,
+            self.config.des_key,
+            self.config.initial_iv,
+        ) catch false;
+        if (!valid_authenticator) return self.noop();
+
+        const timestamp_update = try validateReceivedTimestamp(
+            self.timestamps,
+            now,
+            frame.header.timestamp,
+        );
+        if (!timestamp_update.accepted) return self.noop();
+        if (frame.header.total_len == 0 or
+            frame.header.total_len > self.config.max_message_size or
+            frame.header.total_len % 8 != 0)
+        {
+            return self.noop();
+        }
+
+        const complete_len: ?usize = switch (frame.header.flags) {
+            1 => frame.header.total_len,
+            4 => if (self.reassembler.total_len == 0) null else self.reassembler.total_len,
+            else => null,
+        };
+        const plaintext_buffer = if (complete_len) |len|
+            try self.allocator.alloc(u8, len)
+        else
+            null;
+        errdefer if (plaintext_buffer) |buffer| self.allocator.free(buffer);
+
+        const ack = try self.makeFrame(
+            2,
+            1,
+            frame.header.id,
+            0,
+            0,
+            frame.header.timestamp,
+            &.{},
+            frame.destination,
+            frame.source,
+        );
+        errdefer self.allocator.free(ack);
+
+        var builder = OutcomeBuilder.init(self.allocator);
+        errdefer builder.deinit();
+        try builder.addFrame(ack);
+        const actions = try builder.finish();
+
+        const accepted = self.reassembler.accept(
+            frame.header.id,
+            frame.header.flags,
+            frame.header.total_len,
+            frame.encrypted,
+            now,
+        ) catch |err| {
+            session_outcome.freeActions(self.allocator, actions);
+            if (plaintext_buffer) |buffer| self.allocator.free(buffer);
+            return err;
+        };
+        switch (accepted) {
+            .ignored => {
+                session_outcome.freeActions(self.allocator, actions);
+                if (plaintext_buffer) |buffer| self.allocator.free(buffer);
+                return self.noop();
+            },
+            .duplicate, .buffered => {},
+            .complete => |complete| {
+                if (plaintext_buffer) |plaintext| {
+                    _ = des.decryptCbc(
+                        self.config.des_key,
+                        self.config.initial_iv,
+                        complete,
+                        plaintext,
+                    ) catch {
+                        self.allocator.free(plaintext);
+                        self.allocator.free(complete);
+                        self.timestamps = timestamp_update.state;
+                        return .{
+                            .actions = actions,
+                            .previous_phase = .{ .direct = self.phase },
+                            .phase = .{ .direct = self.phase },
+                            .next_deadline = self.nextDeadline(),
+                            .failure = null,
+                            .generation = self.generation,
+                        };
+                    };
+                    if (self.received_payload) |previous| self.allocator.free(previous);
+                    self.received_payload = plaintext;
+                }
+                self.allocator.free(complete);
+            },
+        }
+
+        self.timestamps = timestamp_update.state;
+        return .{
+            .actions = actions,
+            .previous_phase = .{ .direct = self.phase },
+            .phase = .{ .direct = self.phase },
+            .next_deadline = self.nextDeadline(),
+            .failure = null,
+            .generation = self.generation,
+        };
+    }
+
+    fn matchesEndpoints(self: *const Machine, frame: wire.DecodedFrame) bool {
+        return frame.header.session_id == self.config.session_id and
+            std.mem.eql(u8, &frame.source.mac, &self.config.peer_mac) and
+            std.mem.eql(u8, &frame.destination.mac, &self.config.network.mac) and
+            frame.source.port == self.config.peer_udp_port and
+            frame.destination.port == self.config.local_udp_port and
+            std.mem.eql(u8, &frame.source.ip, &self.config.peer_ipv4) and
+            std.mem.eql(u8, &frame.destination.ip, &self.config.network.ipv4);
+    }
+
     fn handleTimer(self: *Machine, now: std.Io.Timestamp) Error!Outcome {
-        const deadline = self.ack_deadline orelse return error.InvalidState;
-        if (now.compare(.lt, deadline)) return error.TimerNotDue;
+        const reassembly_deadline = self.reassembler.nextDeadline();
+        const reassembly_expired = self.reassembler.expire(now);
+        const deadline = self.ack_deadline orelse {
+            if (reassembly_expired) return self.noop();
+            if (reassembly_deadline) |reassembly_at| {
+                if (now.compare(.lt, reassembly_at)) return error.TimerNotDue;
+            }
+            return error.InvalidState;
+        };
+        if (now.compare(.lt, deadline)) {
+            if (reassembly_expired) return self.noop();
+            return error.TimerNotDue;
+        }
         const outbound = self.outbound orelse return error.InvalidState;
 
         if (outbound.attempts >= self.config.max_send_attempts) {
@@ -320,7 +455,7 @@ pub const Machine = struct {
             .actions = actions,
             .previous_phase = .{ .direct = self.phase },
             .phase = .{ .direct = self.phase },
-            .next_deadline = self.ack_deadline,
+            .next_deadline = self.nextDeadline(),
             .failure = null,
             .generation = self.generation,
         };
@@ -336,11 +471,23 @@ pub const Machine = struct {
     ) Error!PreparedFragment {
         const timestamp_update = try nextSendTimestamp(timestamps, now);
         const frame = try self.makeFrame(
+            1,
+            1,
             id,
             fragment.flags,
             @intCast(encrypted.len),
             timestamp_update.timestamp,
             encrypted[fragment.offset..][0..fragment.len],
+            .{
+                .mac = self.config.network.mac,
+                .ip = self.config.network.ipv4,
+                .port = self.config.local_udp_port,
+            },
+            .{
+                .mac = self.config.peer_mac,
+                .ip = self.config.peer_ipv4,
+                .port = self.config.peer_udp_port,
+            },
         );
         return .{
             .frame = frame,
@@ -353,7 +500,7 @@ pub const Machine = struct {
             .actions = try self.allocator.alloc(Action, 0),
             .previous_phase = .{ .direct = self.phase },
             .phase = .{ .direct = self.phase },
-            .next_deadline = self.ack_deadline,
+            .next_deadline = self.nextDeadline(),
             .failure = null,
             .generation = self.generation,
         };
@@ -361,11 +508,15 @@ pub const Machine = struct {
 
     fn makeFrame(
         self: *Machine,
+        code: u8,
+        message_type: u8,
         id: u32,
         flags: u8,
         total_len: u32,
         timestamp: u64,
         encrypted: []const u8,
+        source: wire.Endpoint,
+        destination: wire.Endpoint,
     ) Error![]u8 {
         const frame_len = wire.ethernet_header_size + wire.ipv4_header_size +
             wire.udp_header_size + wire.header_size + encrypted.len;
@@ -374,24 +525,16 @@ pub const Machine = struct {
 
         _ = wire.encodeFrame(.{
             .version = 1,
-            .code = 1,
+            .code = code,
             .id = id,
             .packet_len = @intCast(wire.header_size + encrypted.len),
             .authenticator = @splat(0),
             .session_id = self.config.session_id,
             .timestamp = timestamp,
-            .message_type = 1,
+            .message_type = message_type,
             .flags = flags,
             .total_len = total_len,
-        }, encrypted, .{
-            .mac = self.config.network.mac,
-            .ip = self.config.network.ipv4,
-            .port = self.config.local_udp_port,
-        }, .{
-            .mac = self.config.peer_mac,
-            .ip = self.config.peer_ipv4,
-            .port = self.config.peer_udp_port,
-        }, frame) catch return error.InvalidConfig;
+        }, encrypted, source, destination, frame) catch return error.InvalidConfig;
 
         wire.setAuthenticator(
             frame,
@@ -470,6 +613,15 @@ fn fragmentAt(total_len: usize, offset: usize) Fragment {
     else
         3;
     return .{ .offset = offset, .len = len, .flags = flags };
+}
+
+fn minimumDeadline(
+    first: ?std.Io.Timestamp,
+    second: ?std.Io.Timestamp,
+) ?std.Io.Timestamp {
+    if (first == null) return second;
+    if (second == null) return first;
+    return if (first.?.compare(.lt, second.?)) first.? else second.?;
 }
 
 fn makeSamHandshake(
@@ -595,6 +747,158 @@ test "Direct retransmits the same fragment until attempts are exhausted" {
     try std.testing.expectEqual(@as(usize, 0), failed.actions.len);
 }
 
+test "Direct acknowledges and decrypts a complete inbound message" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    var plaintext: [16]u8 = undefined;
+    for (&plaintext, 0..) |*byte, index| byte.* = @intCast(index);
+    var encrypted: [16]u8 = undefined;
+    _ = try des.encryptCbc(config.des_key, config.initial_iv, &plaintext, &encrypted);
+
+    var frame_buffer: [256]u8 = undefined;
+    const frame = try encodeDataForTest(
+        &frame_buffer,
+        config,
+        1,
+        1,
+        encrypted.len,
+        100,
+        &encrypted,
+    );
+    var received = try machine.step(
+        testTimestamp(0),
+        .{ .frame = .{
+            .generation = machine.currentGeneration(),
+            .bytes = frame,
+        } },
+    );
+    defer received.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), received.actions.len);
+    const ack = try wire.decodeFrame(received.actions[0].send_frame);
+    try std.testing.expectEqual(@as(u8, 2), ack.header.code);
+    try std.testing.expectEqual(@as(u32, 1), ack.header.id);
+    try std.testing.expectEqual(@as(u16, wire.header_size), ack.header.packet_len);
+    try std.testing.expectEqual(@as(u32, 0), ack.header.total_len);
+    try std.testing.expectEqualSlices(u8, &plaintext, machine.received_payload.?);
+}
+
+test "Direct reassembles only a complete ordered sequence" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    const total_len = 3008;
+    const plaintext = try std.testing.allocator.alloc(u8, total_len);
+    defer std.testing.allocator.free(plaintext);
+    for (plaintext, 0..) |*byte, index| byte.* = @truncate(index);
+    const encrypted = try std.testing.allocator.alloc(u8, total_len);
+    defer std.testing.allocator.free(encrypted);
+    _ = try des.encryptCbc(config.des_key, config.initial_iv, plaintext, encrypted);
+
+    var first = try sendDataForTest(&machine, config, 1, 2, total_len, 100, encrypted[0..1358]);
+    first.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?[]u8, null), machine.received_payload);
+    try std.testing.expectEqual(
+        testTimestamp(9 * std.time.ns_per_s),
+        machine.nextDeadline().?,
+    );
+
+    var skipped = try sendDataForTest(&machine, config, 3, 3, total_len, 100, encrypted[1358..2716]);
+    try std.testing.expectEqual(@as(usize, 0), skipped.actions.len);
+    skipped.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        testTimestamp(9 * std.time.ns_per_s),
+        machine.nextDeadline().?,
+    );
+
+    var duplicate = try sendDataForTest(&machine, config, 1, 2, total_len, 100, encrypted[0..1358]);
+    try std.testing.expectEqual(@as(usize, 1), duplicate.actions.len);
+    duplicate.deinit(std.testing.allocator);
+
+    var middle = try sendDataForTest(&machine, config, 2, 3, total_len, 100, encrypted[1358..2716]);
+    middle.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?[]u8, null), machine.received_payload);
+
+    var last = try sendDataForTest(&machine, config, 3, 4, total_len, 100, encrypted[2716..]);
+    last.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, plaintext, machine.received_payload.?);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), machine.nextDeadline());
+}
+
+test "Direct expires incomplete reassembly after nine seconds" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    const encrypted = try std.testing.allocator.alloc(u8, 3008);
+    defer std.testing.allocator.free(encrypted);
+    @memset(encrypted, 0x44);
+
+    var first = try sendDataForTest(&machine, config, 1, 2, 3008, 100, encrypted[0..1358]);
+    first.deinit(std.testing.allocator);
+    var expired = try machine.step(
+        testTimestamp(9 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    defer expired.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), expired.actions.len);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), machine.nextDeadline());
+
+    var last = try sendDataForTest(&machine, config, 2, 4, 3008, 100, encrypted[1358..2716]);
+    try std.testing.expectEqual(@as(usize, 0), last.actions.len);
+    last.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?[]u8, null), machine.received_payload);
+}
+
+test "Direct rejects oversized reassembly before allocation" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    const encrypted = try std.testing.allocator.alloc(u8, 1358);
+    defer std.testing.allocator.free(encrypted);
+    @memset(encrypted, 0x55);
+    var rejected = try sendDataForTest(
+        &machine,
+        config,
+        1,
+        2,
+        @intCast(config.max_message_size + 8),
+        100,
+        encrypted,
+    );
+    defer rejected.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), rejected.actions.len);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), machine.nextDeadline());
+}
+
+test "Direct timestamp modes reject timestamps outside their windows" {
+    const server = TimestampState{ .server = .{
+        .server_anchor = 1000,
+        .local_anchor = testTimestamp(0),
+    } };
+    const accepted_server = try validateReceivedTimestamp(server, testTimestamp(0), 1038);
+    try std.testing.expect(accepted_server.accepted);
+    const rejected_server = try validateReceivedTimestamp(server, testTimestamp(0), 1061);
+    try std.testing.expect(!rejected_server.accepted);
+
+    const monotonic = TimestampState{ .monotonic = .{
+        .next_send = 100,
+        .received = 100,
+    } };
+    var state = monotonic;
+    for (0..5) |_| {
+        const update = try validateReceivedTimestamp(state, testTimestamp(0), 100);
+        try std.testing.expect(update.accepted);
+        state = update.state;
+    }
+    const rejected_monotonic = try validateReceivedTimestamp(state, testTimestamp(0), 100);
+    try std.testing.expect(!rejected_monotonic.accepted);
+}
+
 fn testConfig() types.DirectSessionConfig {
     return .{
         .mode = .{ .sam = .{
@@ -639,6 +943,64 @@ fn encodeAckForFrame(
     }, &.{}, frame.destination, frame.source, output);
     try wire.setAuthenticator(encoded, config.des_key, config.initial_iv);
     return encoded;
+}
+
+fn encodeDataForTest(
+    output: []u8,
+    config: types.DirectSessionConfig,
+    id: u32,
+    flags: u8,
+    total_len: u32,
+    timestamp: u64,
+    encrypted: []const u8,
+) ![]u8 {
+    const encoded = try wire.encodeFrame(.{
+        .version = 1,
+        .code = 1,
+        .id = id,
+        .packet_len = @intCast(wire.header_size + encrypted.len),
+        .authenticator = @splat(0),
+        .session_id = config.session_id,
+        .timestamp = timestamp,
+        .message_type = 1,
+        .flags = flags,
+        .total_len = total_len,
+    }, encrypted, .{
+        .mac = config.peer_mac,
+        .ip = config.peer_ipv4,
+        .port = config.peer_udp_port,
+    }, .{
+        .mac = config.network.mac,
+        .ip = config.network.ipv4,
+        .port = config.local_udp_port,
+    }, output);
+    try wire.setAuthenticator(encoded, config.des_key, config.initial_iv);
+    return encoded;
+}
+
+fn sendDataForTest(
+    machine: *Machine,
+    config: types.DirectSessionConfig,
+    id: u32,
+    flags: u8,
+    total_len: u32,
+    timestamp: u64,
+    encrypted: []const u8,
+) !Outcome {
+    var frame_buffer: [4096]u8 = undefined;
+    const frame = try encodeDataForTest(
+        &frame_buffer,
+        config,
+        id,
+        flags,
+        total_len,
+        timestamp,
+        encrypted,
+    );
+    return machine.step(testTimestamp(0), .{ .frame = .{
+        .generation = machine.currentGeneration(),
+        .bytes = frame,
+    } });
 }
 
 fn testTimestamp(nanoseconds: i96) std.Io.Timestamp {

@@ -20,16 +20,20 @@ pub const Outcome = struct {
 
     /// Releases every owned frame and the action slice using the allocator passed to `Session.init`.
     pub fn deinit(self: *Outcome, allocator: std.mem.Allocator) void {
-        for (self.actions) |action| {
-            switch (action) {
-                .send_frame => |frame| allocator.free(frame),
-                else => {},
-            }
-        }
-        allocator.free(self.actions);
+        freeActions(allocator, self.actions);
         self.* = undefined;
     }
 };
+
+pub fn freeActions(allocator: std.mem.Allocator, actions: []Action) void {
+    for (actions) |action| {
+        switch (action) {
+            .send_frame => |frame| allocator.free(frame),
+            else => {},
+        }
+    }
+    allocator.free(actions);
+}
 
 /// Builds one transaction's actions and owns any frame allocated before commit.
 pub const OutcomeBuilder = struct {
