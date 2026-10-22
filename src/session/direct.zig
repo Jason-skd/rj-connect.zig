@@ -21,7 +21,6 @@ const TimestampState = union(enum) {
     server: struct {
         server_anchor: u64,
         local_anchor: std.Io.Timestamp,
-        received: ?u64 = null,
     },
     monotonic: struct {
         next_send: u64,
@@ -1196,7 +1195,6 @@ fn validateReceivedTimestamp(
                 return error.TimestampOverflow;
             const distance = if (received >= expected) received - expected else expected - received;
             if (distance >= 61) break :blk .{ .accepted = false, .state = state };
-            server.received = received;
             break :blk .{ .accepted = true, .state = next };
         },
         .monotonic => |*monotonic| blk: {

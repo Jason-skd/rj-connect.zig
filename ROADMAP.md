@@ -195,7 +195,7 @@ pub fn step(
 - 新机器激活时递增代次；同一机器内部重发不递增；旁路协议帧返回状态不变的 no-op `Outcome`。
 - `Session` 显式拥有动态资源并提供 `deinit`；状态转换采用准备完成后再提交，不复制整个 `Session`。
 - 直接会话由已认证 EAP 状态上的显式 `direct_session` 事件启动，不能隐式从私有字段自动启动。
-- `DirectSessionConfig` 一次提交并复制生命周期所需内容，包含模式、端点、session ID、key/IV、时间戳模式、用户名、网络信息、SAM/SMP 参数、周期和最高版本；输入切片不跨调用保存。
+- `DirectSessionConfig` 一次提交并复制生命周期所需内容，包含模式、端点、session ID、key/IV、时间戳模式、用户名、网络信息、SAM/SMP 参数和周期；最高版本仍是 adapter 侧的能力协商信息，输入切片不跨调用保存。
 - `DirectSessionConfig` 使用公共字段 struct 加 `mode` union；SAM 与 SMP 的独有字段分别由命名 struct 完整包装，再对两个包装做 tagged union，不把每个字段建模成独立 optional。
 - 网络入口和发送动作统一使用完整 Ethernet II 帧，由 EtherType 分流；IPv4 固定 IHL 5、protocol 17、无 IP 分片，并严格校验长度与 checksum。
 - 每片通过端点、session、时间戳、authenticator 和序列校验后立即 ACK；ACK 回显 ID/session/端点，`packet_len=42`、`total_len=0`。
