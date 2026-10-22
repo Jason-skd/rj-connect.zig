@@ -1,5 +1,30 @@
 # Changelog
 
+## c2b4f74
+
+### Added
+
+- 新增统一的 EAP-MD5/SAM/SMP `Session` 协调器，以 `ActivePhase` 和 `Generation` 表达单活动协议机、协议切换和旧事件失效。
+- 新增完整 Ethernet II、IPv4、UDP、42 字节 direct header、MD5 authenticator 和 DES-CBC 的 Direct 收发边界。
+- 新增 1358 字节分片、逐片 ACK、3 秒重发、最多 3 次发送、严格有序重组、1 MiB 默认消息上限和片段序列校验。
+- 新增服务器时间与单调兼容时间戳模式、61 秒服务器窗口、连续非前进容忍、重组 9 秒超时和片段级重放进度。
+- 新增 SAM 最小握手、用户信息、DHCP 认证结果、心跳和重认证生命周期。
+- 新增 SMP hello 初始化、可配置 0/30/60 秒请求节奏、10 秒响应窗口、90 秒初始化上限、用户信息、DHCP 状态和活动 hello。
+- 新增拥有型 `direct_auth_result` 与 `reauth_required` 动作；GBK 服务器文本由调用方通过 `Outcome.deinit` 释放。
+- 新增本地取消、远端 Logoff、协议机释放、`Session.deinit` 和关键分配失败的事务性覆盖。
+
+### Changed
+
+- 公开阶段由单一 `Phase` 改为 `ActivePhase`，EAP-MD5 使用 `EapMd5Phase`，Direct 使用 `DirectPhase`。
+- `Session` 现在必须显式 `deinit`；`frame` 事件可承载 EAPOL 或完整 Direct Ethernet 帧，并按 EtherType 分流。
+- Direct 会话只能通过 EAP 已认证状态上的显式 `direct_session` 事件启动。SAM/SMP 配置和 GBK 用户名在提交时复制。
+
+### Limits
+
+- Direct 当前只实现 IPv4、IHL 5、无 IP 分片和 direct version 1。
+- PEAP/TLS、MSCHAPv2 和 M5 隧道编排仍未实现；M4 不自动从 EAP 私有字段推导 Direct 配置。
+- 真实服务器互操作、硬件信息字段最小集合、目标服务器最高版本和可选字段组合仍需 adapter 验证。
+
 ## 0d457f0
 
 ### Changed
