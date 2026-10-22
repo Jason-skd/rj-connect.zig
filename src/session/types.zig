@@ -20,14 +20,17 @@ pub const Generation = struct {
     }
 };
 
-pub const Phase = enum {
-    disconnected,
+pub const EapMd5Phase = enum {
     connecting,
     acquired,
     authenticating,
     authenticated,
     held,
-    logoff,
+};
+
+pub const ActivePhase = union(enum) {
+    idle,
+    eap_md5: EapMd5Phase,
 };
 
 pub const Config = struct {
@@ -39,6 +42,17 @@ pub const Config = struct {
     max_start_attempts: u16 = 3,
     max_auth_failures: u16 = 3,
     dhcp_second_auth: bool = false,
+
+    pub fn validate(self: Config) Error!void {
+        if (self.start_timeout.toNanoseconds() <= 0 or
+            self.auth_timeout.toNanoseconds() <= 0 or
+            self.held_timeout.toNanoseconds() <= 0 or
+            self.max_start_attempts == 0 or
+            self.max_auth_failures == 0)
+        {
+            return error.InvalidConfig;
+        }
+    }
 };
 
 pub const CredentialPurpose = enum {

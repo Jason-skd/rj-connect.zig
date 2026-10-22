@@ -22,6 +22,8 @@ pub fn add(a: i32, b: i32) i32 {
 test {
     _ = protocol;
     _ = session;
+    _ = @import("session/session_test.zig");
+    _ = @import("session/session_eap_md5_test.zig");
 }
 
 test "session is exposed from the package root" {

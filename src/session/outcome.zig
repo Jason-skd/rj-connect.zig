@@ -12,8 +12,8 @@ pub const Action = union(enum) {
 pub const Outcome = struct {
     /// Sending actions own their frame bytes until `deinit` is called.
     actions: []Action,
-    previous_phase: types.Phase,
-    phase: types.Phase,
+    previous_phase: types.ActivePhase,
+    phase: types.ActivePhase,
     next_deadline: ?std.Io.Timestamp,
     failure: ?types.FailureReason,
     generation: types.Generation,
