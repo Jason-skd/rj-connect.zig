@@ -1159,9 +1159,7 @@ fn nextSendTimestamp(
     var next = state;
     return switch (next) {
         .server => |*server| blk: {
-            const elapsed = now.nanoseconds - server.local_anchor.nanoseconds;
-            if (elapsed < 0) return error.TimeWentBackwards;
-            const seconds: u64 = @intCast(@divFloor(elapsed, std.time.ns_per_s));
+            const seconds = try elapsedSeconds(now, server.local_anchor);
             const timestamp = std.math.add(u64, server.server_anchor, seconds) catch
                 return error.TimestampOverflow;
             break :blk .{ .timestamp = timestamp, .state = next };
@@ -1183,9 +1181,7 @@ fn validateReceivedTimestamp(
     var next = state;
     return switch (next) {
         .server => |*server| blk: {
-            const elapsed = now.nanoseconds - server.local_anchor.nanoseconds;
-            if (elapsed < 0) return error.TimeWentBackwards;
-            const seconds: u64 = @intCast(@divFloor(elapsed, std.time.ns_per_s));
+            const seconds = try elapsedSeconds(now, server.local_anchor);
             const expected = std.math.add(u64, server.server_anchor, seconds) catch
                 return error.TimestampOverflow;
             const distance = if (received >= expected) received - expected else expected - received;
@@ -1206,6 +1202,13 @@ fn validateReceivedTimestamp(
             break :blk .{ .accepted = true, .state = next };
         },
     };
+}
+
+fn elapsedSeconds(now: std.Io.Timestamp, anchor: std.Io.Timestamp) Error!u64 {
+    const elapsed = @subWithOverflow(now.nanoseconds, anchor.nanoseconds);
+    if (elapsed[1] != 0) return error.TimestampOverflow;
+    if (elapsed[0] < 0) return error.TimeWentBackwards;
+    return @intCast(@divFloor(elapsed[0], std.time.ns_per_s));
 }
 
 fn fragmentAt(total_len: usize, offset: usize) Fragment {
@@ -1625,6 +1628,25 @@ test "Direct timestamp modes reject timestamps outside their windows" {
     }
     const rejected_monotonic = try validateReceivedTimestamp(state, testTimestamp(0), 100);
     try std.testing.expect(!rejected_monotonic.accepted);
+
+    const overflowing = TimestampState{ .server = .{
+        .server_anchor = 1000,
+        .local_anchor = testTimestamp(std.math.minInt(i96)),
+    } };
+    const latest = testTimestamp(std.math.maxInt(i96));
+    try std.testing.expectError(error.TimestampOverflow, nextSendTimestamp(overflowing, latest));
+    try std.testing.expectError(
+        error.TimestampOverflow,
+        validateReceivedTimestamp(overflowing, latest, 1000),
+    );
+    const backward = TimestampState{ .server = .{
+        .server_anchor = 1000,
+        .local_anchor = testTimestamp(0),
+    } };
+    try std.testing.expectError(
+        error.TimeWentBackwards,
+        nextSendTimestamp(backward, testTimestamp(-1)),
+    );
 }
 
 test "Direct maps a rejected SAM result to a terminal event" {
