@@ -78,6 +78,7 @@ pub const FailureReason = enum {
     direct_send_failed,
     direct_result_rejected,
     direct_result_timeout,
+    smp_initialization_timeout,
 };
 
 pub const DhcpStep = enum(u8) {
@@ -129,8 +130,27 @@ pub const SamConfig = struct {
     endpoint_parameter: [6]u8,
 };
 
+pub const SmpConfig = struct {
+    session_parameter: [4]u8,
+    initial_request_delay: std.Io.Duration = .fromSeconds(0),
+    retry_interval: std.Io.Duration = .fromSeconds(30),
+    request_timeout: std.Io.Duration = .fromSeconds(10),
+    initialization_timeout: std.Io.Duration = .fromSeconds(90),
+
+    pub fn validate(self: SmpConfig) Error!void {
+        if (self.initial_request_delay.toNanoseconds() < 0 or
+            self.retry_interval.toNanoseconds() <= 0 or
+            self.request_timeout.toNanoseconds() <= 0 or
+            self.initialization_timeout.toNanoseconds() <= 0)
+        {
+            return error.InvalidConfig;
+        }
+    }
+};
+
 pub const DirectMode = union(enum) {
     sam: SamConfig,
+    smp: SmpConfig,
 };
 
 pub const DirectSessionConfig = struct {
@@ -156,6 +176,10 @@ pub const DirectSessionConfig = struct {
             self.ack_timeout.toNanoseconds() <= 0 or self.max_send_attempts == 0)
         {
             return error.InvalidConfig;
+        }
+        switch (self.mode) {
+            .sam => {},
+            .smp => |smp_config| try smp_config.validate(),
         }
     }
 };

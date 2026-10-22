@@ -23,6 +23,7 @@ pub const FrameInput = types.FrameInput;
 pub const DirectNetworkInfo = types.DirectNetworkInfo;
 pub const DirectTimestampMode = types.DirectTimestampMode;
 pub const SamConfig = types.SamConfig;
+pub const SmpConfig = types.SmpConfig;
 pub const DirectMode = types.DirectMode;
 pub const DirectSessionConfig = types.DirectSessionConfig;
 pub const DirectAuthResult = types.DirectAuthResult;

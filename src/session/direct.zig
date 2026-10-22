@@ -4,6 +4,7 @@ const std = @import("std");
 const des = @import("../protocol/des.zig");
 const wire = @import("../protocol/direct.zig");
 const sam = @import("../protocol/sam.zig");
+const smp = @import("../protocol/smp.zig");
 const reassembly = @import("reassembly.zig");
 const session_outcome = @import("outcome.zig");
 const time = @import("time.zig");
@@ -53,7 +54,15 @@ const Outbound = struct {
 
 const MessageKind = enum {
     handshake,
+    smp_hello,
     user_info,
+};
+
+const SmpInitialization = struct {
+    attempts: u8 = 1,
+    next_request_at: ?std.Io.Timestamp,
+    response_deadline: ?std.Io.Timestamp = null,
+    initialization_deadline: std.Io.Timestamp,
 };
 
 const PreparedFragment = struct {
@@ -71,6 +80,7 @@ pub const Machine = struct {
     outbound: ?Outbound = null,
     ack_deadline: ?std.Io.Timestamp = null,
     result_deadline: ?std.Io.Timestamp = null,
+    smp_initialization: ?SmpInitialization = null,
     reassembler: reassembly.Reassembler,
     received_payload: ?[]u8 = null,
 
@@ -81,8 +91,6 @@ pub const Machine = struct {
         generation: types.Generation,
     ) Error!Machine {
         try config.validate();
-        if (config.mode != .sam) return error.InvalidConfig;
-
         const username = try allocator.dupe(u8, config.username_gbk);
         errdefer allocator.free(username);
 
@@ -124,32 +132,57 @@ pub const Machine = struct {
     }
 
     pub fn nextDeadline(self: *const Machine) ?std.Io.Timestamp {
-        return minimumDeadline(
+        var deadline = minimumDeadline(
             minimumDeadline(self.ack_deadline, self.reassembler.nextDeadline()),
             self.result_deadline,
         );
+        if (self.smp_initialization) |state| {
+            deadline = minimumDeadline(deadline, state.initialization_deadline);
+            deadline = minimumDeadline(deadline, state.response_deadline);
+            deadline = minimumDeadline(deadline, state.next_request_at);
+        }
+        return deadline;
     }
 
     pub fn start(self: *Machine, now: std.Io.Timestamp) Error!Outcome {
-        const handshake = switch (self.config.mode) {
-            .sam => |sam_config| sam_config,
+        return switch (self.config.mode) {
+            .sam => |handshake| blk: {
+                const payload = try self.allocator.alloc(
+                    u8,
+                    sam.handshakeSize(
+                        self.config.username_gbk.len,
+                        handshake.session_parameter.len,
+                        handshake.endpoint_parameter.len,
+                    ),
+                );
+                defer self.allocator.free(payload);
+                _ = sam.encodeHandshake(
+                    self.config.username_gbk,
+                    handshake.session_parameter,
+                    handshake.endpoint_parameter,
+                    payload,
+                ) catch return error.InvalidConfig;
+                break :blk self.beginPayload(payload, .handshake, now);
+            },
+            .smp => |smp_config| blk: {
+                const send_immediately = smp_config.initial_request_delay.toNanoseconds() == 0;
+                self.smp_initialization = .{
+                    .attempts = if (send_immediately) 1 else 0,
+                    .next_request_at = if (send_immediately)
+                        try time.addDuration(now, smp_config.retry_interval)
+                    else
+                        try time.addDuration(now, smp_config.initial_request_delay),
+                    .initialization_deadline = try time.addDuration(
+                        now,
+                        smp_config.initialization_timeout,
+                    ),
+                };
+                break :blk if (send_immediately)
+                    self.beginSmpHello(now)
+                else
+                    self.emptyInitializingOutcome();
+            },
         };
-        const payload = try self.allocator.alloc(
-            u8,
-            sam.handshakeSize(
-                self.config.username_gbk.len,
-                handshake.session_parameter.len,
-                handshake.endpoint_parameter.len,
-            ),
-        );
-        defer self.allocator.free(payload);
-        _ = sam.encodeHandshake(
-            self.config.username_gbk,
-            handshake.session_parameter,
-            handshake.endpoint_parameter,
-            payload,
-        ) catch return error.InvalidConfig;
-        return self.beginPayload(payload, .handshake, now);
     }
 
     pub fn step(self: *Machine, now: std.Io.Timestamp, input: Input) Error!Outcome {
@@ -224,34 +257,94 @@ pub const Machine = struct {
         return self.beginMessage(encrypted, kind, now);
     }
 
+    fn beginSmpHello(self: *Machine, now: std.Io.Timestamp) Error!Outcome {
+        const config = switch (self.config.mode) {
+            .smp => |smp_config| smp_config,
+            .sam => return error.InvalidState,
+        };
+        const payload = try self.allocator.alloc(
+            u8,
+            smp.helloSize(self.config.username_gbk.len, config.session_parameter.len),
+        );
+        defer self.allocator.free(payload);
+        _ = smp.encodeHello(
+            self.config.username_gbk,
+            &config.session_parameter,
+            payload,
+        ) catch return error.InvalidConfig;
+        return self.beginPayload(payload, .smp_hello, now);
+    }
+
+    fn emptyInitializingOutcome(self: *Machine) Error!Outcome {
+        return .{
+            .actions = try self.allocator.alloc(Action, 0),
+            .previous_phase = .{ .direct = .initializing },
+            .phase = .{ .direct = .initializing },
+            .next_deadline = self.nextDeadline(),
+            .failure = null,
+            .generation = self.generation,
+        };
+    }
+
     fn beginUserInfo(self: *Machine, now: std.Io.Timestamp) Error!Outcome {
-        const current = self.outbound orelse return error.InvalidState;
+        const current = self.outbound;
         self.outbound = null;
 
-        const info = sam.UserInfo{
-            .username_gbk = self.config.username_gbk,
-            .ipv4 = self.config.network.ipv4,
-            .mac = self.config.network.mac,
-            .netmask = self.config.network.netmask,
-            .gateway = self.config.network.gateway,
-            .dns = self.config.network.dns,
+        const payload_len = switch (self.config.mode) {
+            .sam => sam.userInfoSize(.{
+                .username_gbk = self.config.username_gbk,
+                .ipv4 = self.config.network.ipv4,
+                .mac = self.config.network.mac,
+                .netmask = self.config.network.netmask,
+                .gateway = self.config.network.gateway,
+                .dns = self.config.network.dns,
+            }),
+            .smp => smp.userInfoSize(.{
+                .username_gbk = self.config.username_gbk,
+                .ipv4 = self.config.network.ipv4,
+                .netmask = self.config.network.netmask,
+                .gateway = self.config.network.gateway,
+                .dns = self.config.network.dns,
+                .alternate_dns = self.config.network.alternate_dns,
+                .mac = self.config.network.mac,
+            }),
         };
-        const payload_len = sam.userInfoSize(info);
         const payload = self.allocator.alloc(u8, payload_len) catch |err| {
             self.outbound = current;
             return err;
         };
         defer self.allocator.free(payload);
-        _ = sam.encodeUserInfo(info, payload) catch {
-            self.outbound = current;
-            return error.InvalidConfig;
-        };
+        switch (self.config.mode) {
+            .sam => _ = sam.encodeUserInfo(.{
+                .username_gbk = self.config.username_gbk,
+                .ipv4 = self.config.network.ipv4,
+                .mac = self.config.network.mac,
+                .netmask = self.config.network.netmask,
+                .gateway = self.config.network.gateway,
+                .dns = self.config.network.dns,
+            }, payload) catch {
+                self.outbound = current;
+                return error.InvalidConfig;
+            },
+            .smp => _ = smp.encodeUserInfo(.{
+                .username_gbk = self.config.username_gbk,
+                .ipv4 = self.config.network.ipv4,
+                .netmask = self.config.network.netmask,
+                .gateway = self.config.network.gateway,
+                .dns = self.config.network.dns,
+                .alternate_dns = self.config.network.alternate_dns,
+                .mac = self.config.network.mac,
+            }, payload) catch {
+                self.outbound = current;
+                return error.InvalidConfig;
+            },
+        }
 
         const result = self.beginPayload(payload, .user_info, now) catch |err| {
             self.outbound = current;
             return err;
         };
-        self.allocator.free(current.encrypted);
+        if (current) |previous| self.allocator.free(previous.encrypted);
         return result;
     }
 
@@ -290,6 +383,29 @@ pub const Machine = struct {
             self.timestamps = timestamp_update.state;
             switch (outbound.kind) {
                 .handshake => return self.beginUserInfo(now),
+                .smp_hello => {
+                    const smp_config = switch (self.config.mode) {
+                        .smp => |value| value,
+                        .sam => return error.InvalidState,
+                    };
+                    const actions = try self.allocator.alloc(Action, 0);
+                    errdefer self.allocator.free(actions);
+                    self.allocator.free(outbound.encrypted);
+                    self.outbound = null;
+                    self.ack_deadline = null;
+                    self.smp_initialization.?.response_deadline = try time.addDuration(
+                        now,
+                        smp_config.request_timeout,
+                    );
+                    return .{
+                        .actions = actions,
+                        .previous_phase = .{ .direct = .initializing },
+                        .phase = .{ .direct = .initializing },
+                        .next_deadline = self.nextDeadline(),
+                        .failure = null,
+                        .generation = self.generation,
+                    };
+                },
                 .user_info => {
                     const actions = try self.allocator.alloc(Action, 0);
                     errdefer self.allocator.free(actions);
@@ -401,7 +517,6 @@ pub const Machine = struct {
             frame.destination,
             frame.source,
         );
-        errdefer self.allocator.free(ack);
 
         var builder = OutcomeBuilder.init(self.allocator);
         errdefer builder.deinit();
@@ -416,7 +531,6 @@ pub const Machine = struct {
             now,
         ) catch |err| {
             session_outcome.freeActions(self.allocator, actions);
-            if (plaintext_buffer) |buffer| self.allocator.free(buffer);
             return err;
         };
         switch (accepted) {
@@ -446,15 +560,38 @@ pub const Machine = struct {
                             .generation = self.generation,
                         };
                     };
-                    const sam_result = sam.parseDhcpAuthResult(plaintext) catch null;
-                    if (sam_result) |result| {
+                    const auth_result: ?sam.DhcpAuthResult = switch (self.config.mode) {
+                        .sam => sam.parseDhcpAuthResult(plaintext) catch null,
+                        .smp => blk: {
+                            if (smp.isHello(plaintext) and self.smp_initialization != null) {
+                                self.allocator.free(complete);
+                                const outcome = self.acceptSmpHello(
+                                    actions,
+                                    now,
+                                    timestamp_update.state,
+                                ) catch |err| {
+                                    return err;
+                                };
+                                self.allocator.free(plaintext);
+                                return outcome;
+                            }
+                            const result = smp.parseDhcpAuthResult(plaintext) catch null;
+                            if (result) |value| {
+                                break :blk .{
+                                    .success = value.success,
+                                    .message_gbk = value.message_gbk,
+                                };
+                            }
+                            break :blk null;
+                        },
+                    };
+                    if (auth_result) |result| {
                         self.allocator.free(complete);
                         const outcome = self.completeWithSamResult(
                             actions,
                             result,
                             timestamp_update.state,
                         ) catch |err| {
-                            self.allocator.free(plaintext);
                             return err;
                         };
                         self.allocator.free(plaintext);
@@ -473,6 +610,29 @@ pub const Machine = struct {
             .previous_phase = .{ .direct = self.phase },
             .phase = .{ .direct = self.phase },
             .next_deadline = self.nextDeadline(),
+            .failure = null,
+            .generation = self.generation,
+        };
+    }
+
+    fn acceptSmpHello(
+        self: *Machine,
+        actions: []Action,
+        now: std.Io.Timestamp,
+        timestamps: TimestampState,
+    ) Error!Outcome {
+        self.timestamps = timestamps;
+        self.smp_initialization = null;
+        const user_info = self.beginUserInfo(now) catch |err| {
+            session_outcome.freeActions(self.allocator, actions);
+            return err;
+        };
+        const combined = try combineActionSlices(self.allocator, actions, user_info.actions);
+        return .{
+            .actions = combined,
+            .previous_phase = .{ .direct = .initializing },
+            .phase = user_info.phase,
+            .next_deadline = user_info.next_deadline,
             .failure = null,
             .generation = self.generation,
         };
@@ -541,6 +701,7 @@ pub const Machine = struct {
     }
 
     fn handleTimer(self: *Machine, now: std.Io.Timestamp) Error!Outcome {
+        if (try self.handleSmpTimer(now)) |outcome| return outcome;
         const reassembly_deadline = self.reassembler.nextDeadline();
         const reassembly_expired = self.reassembler.expire(now);
         const result_deadline = self.result_deadline;
@@ -556,6 +717,9 @@ pub const Machine = struct {
             }
             if (reassembly_deadline) |reassembly_at| {
                 if (now.compare(.lt, reassembly_at)) return error.TimerNotDue;
+            }
+            if (self.nextDeadline()) |next| {
+                if (now.compare(.lt, next)) return error.TimerNotDue;
             }
             return error.InvalidState;
         };
@@ -608,6 +772,58 @@ pub const Machine = struct {
             .phase = .{ .direct = self.phase },
             .next_deadline = self.nextDeadline(),
             .failure = null,
+            .generation = self.generation,
+        };
+    }
+
+    fn handleSmpTimer(self: *Machine, now: std.Io.Timestamp) Error!?Outcome {
+        var state = &(self.smp_initialization orelse return null);
+        if (!now.compare(.lt, state.initialization_deadline)) {
+            return try self.smpInitializationTimeout();
+        }
+        var response_expired = false;
+        if (state.response_deadline) |deadline| {
+            if (!now.compare(.lt, deadline)) {
+                state.response_deadline = null;
+                response_expired = true;
+            }
+        }
+        if (state.next_request_at) |request_at| {
+            if (!now.compare(.lt, request_at) and self.outbound == null) {
+                const smp_config = switch (self.config.mode) {
+                    .smp => |value| value,
+                    .sam => return null,
+                };
+                var outcome = try self.beginSmpHello(now);
+                state.attempts += 1;
+                state.response_deadline = null;
+                state.next_request_at = if (state.attempts < 3)
+                    try time.addDuration(now, smp_config.retry_interval)
+                else
+                    null;
+                outcome.next_deadline = self.nextDeadline();
+                return outcome;
+            }
+        }
+        if (response_expired) return try self.noop();
+        return null;
+    }
+
+    fn smpInitializationTimeout(self: *Machine) Error!Outcome {
+        const actions = try self.allocator.alloc(Action, 1);
+        errdefer self.allocator.free(actions);
+        actions[0] = .{ .direct_auth_result = .{
+            .success = false,
+            .server_message_gbk = null,
+        } };
+        self.smp_initialization = null;
+        self.phase = .initializing;
+        return .{
+            .actions = actions,
+            .previous_phase = .{ .direct = .initializing },
+            .phase = .idle,
+            .next_deadline = null,
+            .failure = .smp_initialization_timeout,
             .generation = self.generation,
         };
     }
@@ -792,6 +1008,23 @@ fn minimumDeadline(
     if (first == null) return second;
     if (second == null) return first;
     return if (first.?.compare(.lt, second.?)) first.? else second.?;
+}
+
+fn combineActionSlices(
+    allocator: std.mem.Allocator,
+    first: []Action,
+    second: []Action,
+) Error![]Action {
+    const combined = allocator.alloc(Action, first.len + second.len) catch |err| {
+        session_outcome.freeActions(allocator, first);
+        session_outcome.freeActions(allocator, second);
+        return err;
+    };
+    @memcpy(combined[0..first.len], first);
+    @memcpy(combined[first.len..], second);
+    allocator.free(first);
+    allocator.free(second);
+    return combined;
 }
 
 fn encryptPayload(
@@ -1090,6 +1323,191 @@ test "Direct terminates when the SAM result deadline expires" {
     try std.testing.expectEqual(@as(?[]u8, null), auth.server_message_gbk);
 }
 
+test "Direct retries SMP hello on the configured schedule and times out" {
+    const config = testSmpConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    var started = try machine.start(testTimestamp(0));
+    try std.testing.expectEqual(@as(usize, 1), started.actions.len);
+    try std.testing.expectEqual(
+        testTimestamp(3 * std.time.ns_per_s),
+        machine.nextDeadline().?,
+    );
+    try acknowledgeCurrentFrame(&machine, config, started.actions[0].send_frame, 0);
+    started.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        testTimestamp(10 * std.time.ns_per_s),
+        machine.nextDeadline().?,
+    );
+
+    var response_expired = try machine.step(
+        testTimestamp(10 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    response_expired.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        testTimestamp(30 * std.time.ns_per_s),
+        machine.nextDeadline().?,
+    );
+
+    var second = try machine.step(
+        testTimestamp(30 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    const second_frame = try wire.decodeFrame(second.actions[0].send_frame);
+    try std.testing.expectEqual(@as(u8, 1), second_frame.header.flags);
+    try acknowledgeCurrentFrame(&machine, config, second.actions[0].send_frame, 30);
+    second.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        testTimestamp(40 * std.time.ns_per_s),
+        machine.nextDeadline().?,
+    );
+
+    var second_expired = try machine.step(
+        testTimestamp(40 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    second_expired.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        testTimestamp(60 * std.time.ns_per_s),
+        machine.nextDeadline().?,
+    );
+    var third = try machine.step(
+        testTimestamp(60 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    third.deinit(std.testing.allocator);
+
+    var timed_out = try machine.step(
+        testTimestamp(90 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    defer timed_out.deinit(std.testing.allocator);
+    try std.testing.expectEqual(types.ActivePhase.idle, timed_out.phase);
+    try std.testing.expectEqual(
+        types.FailureReason.smp_initialization_timeout,
+        timed_out.failure.?,
+    );
+}
+
+test "Direct completes SMP initialization and authentication" {
+    const config = testSmpConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    var started = try machine.start(testTimestamp(0));
+    try acknowledgeCurrentFrame(&machine, config, started.actions[0].send_frame, 1);
+    started.deinit(std.testing.allocator);
+
+    var hello_payload: [64]u8 = undefined;
+    const hello = try smp.encodeHello("alice", &.{ 1, 2, 3, 4 }, &hello_payload);
+    var hello_encrypted: [64]u8 = undefined;
+    const hello_cipher_len = std.mem.alignForward(usize, hello.len, 8);
+    var padded_hello: [64]u8 = @splat(0);
+    @memcpy(padded_hello[0..hello.len], hello);
+    _ = try des.encryptCbc(
+        config.des_key,
+        config.initial_iv,
+        padded_hello[0..hello_cipher_len],
+        &hello_encrypted,
+    );
+    var hello_response = try sendDataAtForTest(
+        &machine,
+        config,
+        40,
+        1,
+        @intCast(hello_cipher_len),
+        100,
+        hello_encrypted[0..hello_cipher_len],
+        testTimestamp(2 * std.time.ns_per_s),
+    );
+    try std.testing.expectEqual(@as(usize, 2), hello_response.actions.len);
+    const user_info_frame = try wire.decodeFrame(hello_response.actions[1].send_frame);
+    try std.testing.expectEqual(@as(u8, 1), user_info_frame.header.code);
+    hello_response.deinit(std.testing.allocator);
+
+    var user_info_ack_buffer: [256]u8 = undefined;
+    const user_info_ack = try encodeAckForFrame(
+        &user_info_ack_buffer,
+        user_info_frame,
+        config,
+    );
+    var waiting = try machine.step(
+        testTimestamp(3 * std.time.ns_per_s),
+        .{ .frame = .{
+            .generation = machine.currentGeneration(),
+            .bytes = user_info_ack,
+        } },
+    );
+    waiting.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        types.ActivePhase{ .direct = .awaiting_result },
+        machine.currentPhase(),
+    );
+
+    var result_payload: [16]u8 = @splat(0);
+    result_payload[0..11].* = .{
+        1,    0, 1, 0x2e,
+        0xce, 0, 1, 1,
+        0xcf, 0, 2,
+    };
+    result_payload[11] = 'o';
+    result_payload[12] = 'k';
+    var result_encrypted: [16]u8 = undefined;
+    _ = try des.encryptCbc(
+        config.des_key,
+        config.initial_iv,
+        &result_payload,
+        &result_encrypted,
+    );
+    var result = try sendDataAtForTest(
+        &machine,
+        config,
+        41,
+        1,
+        result_encrypted.len,
+        102,
+        &result_encrypted,
+        testTimestamp(4 * std.time.ns_per_s),
+    );
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        types.ActivePhase{ .direct = .active },
+        result.phase,
+    );
+    const auth = result.actions[1].direct_auth_result;
+    try std.testing.expect(auth.success);
+    try std.testing.expectEqualStrings("ok", auth.server_message_gbk.?);
+}
+
+test "Direct honors a delayed first SMP hello" {
+    var config = testSmpConfig();
+    config.mode.smp.initial_request_delay = .fromSeconds(5);
+    config.mode.smp.initialization_timeout = .fromSeconds(20);
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    var started = try machine.start(testTimestamp(0));
+    try std.testing.expectEqual(@as(usize, 0), started.actions.len);
+    try std.testing.expectEqual(
+        testTimestamp(5 * std.time.ns_per_s),
+        machine.nextDeadline().?,
+    );
+    started.deinit(std.testing.allocator);
+    try std.testing.expectError(error.TimerNotDue, machine.step(
+        testTimestamp(4 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    ));
+
+    var hello = try machine.step(
+        testTimestamp(5 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    defer hello.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), hello.actions.len);
+}
+
 fn testConfig() types.DirectSessionConfig {
     return .{
         .mode = .{ .sam = .{
@@ -1113,6 +1531,14 @@ fn testConfig() types.DirectSessionConfig {
             .mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
         },
     };
+}
+
+fn testSmpConfig() types.DirectSessionConfig {
+    var config = testConfig();
+    config.mode = .{ .smp = .{
+        .session_parameter = .{ 1, 2, 3, 4 },
+    } };
+    return config;
 }
 
 fn encodeAckForFrame(
@@ -1178,6 +1604,28 @@ fn sendDataForTest(
     timestamp: u64,
     encrypted: []const u8,
 ) !Outcome {
+    return sendDataAtForTest(
+        machine,
+        config,
+        id,
+        flags,
+        total_len,
+        timestamp,
+        encrypted,
+        testTimestamp(0),
+    );
+}
+
+fn sendDataAtForTest(
+    machine: *Machine,
+    config: types.DirectSessionConfig,
+    id: u32,
+    flags: u8,
+    total_len: u32,
+    timestamp: u64,
+    encrypted: []const u8,
+    now: std.Io.Timestamp,
+) !Outcome {
     var frame_buffer: [4096]u8 = undefined;
     const frame = try encodeDataForTest(
         &frame_buffer,
@@ -1188,7 +1636,7 @@ fn sendDataForTest(
         timestamp,
         encrypted,
     );
-    return machine.step(testTimestamp(0), .{ .frame = .{
+    return machine.step(now, .{ .frame = .{
         .generation = machine.currentGeneration(),
         .bytes = frame,
     } });
@@ -1217,6 +1665,25 @@ fn enterAwaitingResult(
         types.ActivePhase{ .direct = .awaiting_result },
         machine.currentPhase(),
     );
+}
+
+fn acknowledgeCurrentFrame(
+    machine: *Machine,
+    config: types.DirectSessionConfig,
+    encoded: []const u8,
+    now_seconds: i96,
+) !void {
+    const frame = try wire.decodeFrame(encoded);
+    var ack_buffer: [256]u8 = undefined;
+    const ack = try encodeAckForFrame(&ack_buffer, frame, config);
+    var acknowledged = try machine.step(
+        testTimestamp(now_seconds * std.time.ns_per_s),
+        .{ .frame = .{
+            .generation = machine.currentGeneration(),
+            .bytes = ack,
+        } },
+    );
+    acknowledged.deinit(std.testing.allocator);
 }
 
 fn testTimestamp(nanoseconds: i96) std.Io.Timestamp {
