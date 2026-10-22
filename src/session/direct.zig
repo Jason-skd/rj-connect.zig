@@ -88,7 +88,6 @@ pub const Machine = struct {
     smp_hello_pending: bool = false,
     smp_initialization: ?SmpInitialization = null,
     reassembler: reassembly.Reassembler,
-    received_payload: ?[]u8 = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -124,7 +123,6 @@ pub const Machine = struct {
     pub fn deinit(self: *Machine) void {
         self.allocator.free(self.config.username_gbk);
         if (self.outbound) |outbound| self.allocator.free(outbound.encrypted);
-        if (self.received_payload) |payload| self.allocator.free(payload);
         self.reassembler.deinit();
         self.* = undefined;
     }
@@ -622,6 +620,7 @@ pub const Machine = struct {
                 if (plaintext_buffer) |buffer| self.allocator.free(buffer);
             },
             .complete => |complete| {
+                errdefer self.abandonComplete(complete, frame.encrypted.len);
                 if (plaintext_buffer) |plaintext| {
                     _ = des.decryptCbc(
                         self.config.des_key,
@@ -634,7 +633,7 @@ pub const Machine = struct {
                             complete.id,
                             complete.bytes.len,
                         );
-                        self.allocator.free(complete.bytes);
+                        self.releaseCallerComplete(complete);
                         self.timestamps = timestamp_update.state;
                         return .{
                             .actions = actions,
@@ -656,15 +655,12 @@ pub const Machine = struct {
                                     actions,
                                     now,
                                     timestamp_update.state,
-                                ) catch |err| {
-                                    self.allocator.free(complete.bytes);
-                                    return err;
-                                };
+                                ) catch |err| return err;
                                 self.reassembler.commitComplete(
                                     complete.id,
                                     complete.bytes.len,
                                 );
-                                self.allocator.free(complete.bytes);
+                                self.releaseCallerComplete(complete);
                                 self.allocator.free(plaintext);
                                 return outcome;
                             }
@@ -673,7 +669,7 @@ pub const Machine = struct {
                                     complete.id,
                                     complete.bytes.len,
                                 );
-                                self.allocator.free(complete.bytes);
+                                self.releaseCallerComplete(complete);
                                 self.allocator.free(plaintext);
                                 self.timestamps = timestamp_update.state;
                                 self.smp_hello_pending = false;
@@ -706,15 +702,12 @@ pub const Machine = struct {
                             result,
                             timestamp_update.state,
                             now,
-                        ) catch |err| {
-                            self.allocator.free(complete.bytes);
-                            return err;
-                        };
+                        ) catch |err| return err;
                         self.reassembler.commitComplete(
                             complete.id,
                             complete.bytes.len,
                         );
-                        self.allocator.free(complete.bytes);
+                        self.releaseCallerComplete(complete);
                         self.allocator.free(plaintext);
                         return outcome;
                     }
@@ -722,10 +715,9 @@ pub const Machine = struct {
                         complete.id,
                         complete.bytes.len,
                     );
-                    if (self.received_payload) |previous| self.allocator.free(previous);
-                    self.received_payload = plaintext;
+                    self.releaseCallerComplete(complete);
+                    self.allocator.free(plaintext);
                 }
-                self.allocator.free(complete.bytes);
             },
         }
 
@@ -738,6 +730,24 @@ pub const Machine = struct {
             .failure = null,
             .generation = self.generation,
         };
+    }
+
+    fn abandonComplete(
+        self: *Machine,
+        complete: reassembly.Complete,
+        appended_len: usize,
+    ) void {
+        switch (complete.storage) {
+            .caller => self.allocator.free(complete.bytes),
+            .reassembler => self.reassembler.rollbackAppend(appended_len),
+        }
+    }
+
+    fn releaseCallerComplete(
+        self: *Machine,
+        complete: reassembly.Complete,
+    ) void {
+        if (complete.storage == .caller) self.allocator.free(complete.bytes);
     }
 
     fn acceptSmpHello(
@@ -1438,7 +1448,7 @@ test "Direct retains user information until its result deadline can be represent
     try std.testing.expectEqual(original_deadline, machine.nextDeadline().?);
 }
 
-test "Direct acknowledges and decrypts a complete inbound message" {
+test "Direct acknowledges a complete inbound message" {
     const config = testConfig();
     var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
     defer machine.deinit();
@@ -1473,7 +1483,6 @@ test "Direct acknowledges and decrypts a complete inbound message" {
     try std.testing.expectEqual(@as(u32, 1), ack.header.id);
     try std.testing.expectEqual(@as(u16, wire.header_size), ack.header.packet_len);
     try std.testing.expectEqual(@as(u32, 0), ack.header.total_len);
-    try std.testing.expectEqualSlices(u8, &plaintext, machine.received_payload.?);
 
     var duplicate = try sendDataForTest(&machine, config, 1, 1, encrypted.len, 100, &encrypted);
     try std.testing.expectEqual(@as(usize, 1), duplicate.actions.len);
@@ -1495,7 +1504,6 @@ test "Direct reassembles only a complete ordered sequence" {
 
     var first = try sendDataForTest(&machine, config, 1, 2, total_len, 100, encrypted[0..1358]);
     first.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(?[]u8, null), machine.received_payload);
     try std.testing.expectEqual(
         testTimestamp(9 * std.time.ns_per_s),
         machine.nextDeadline().?,
@@ -1514,12 +1522,12 @@ test "Direct reassembles only a complete ordered sequence" {
     duplicate.deinit(std.testing.allocator);
 
     var middle = try sendDataForTest(&machine, config, 2, 3, total_len, 100, encrypted[1358..2716]);
+    try std.testing.expectEqual(@as(usize, 1), middle.actions.len);
     middle.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(?[]u8, null), machine.received_payload);
 
     var last = try sendDataForTest(&machine, config, 3, 4, total_len, 100, encrypted[2716..]);
+    try std.testing.expectEqual(@as(usize, 1), last.actions.len);
     last.deinit(std.testing.allocator);
-    try std.testing.expectEqualSlices(u8, plaintext, machine.received_payload.?);
     try std.testing.expectEqual(@as(?std.Io.Timestamp, null), machine.nextDeadline());
 }
 
@@ -1545,7 +1553,6 @@ test "Direct expires incomplete reassembly after nine seconds" {
     var last = try sendDataForTest(&machine, config, 2, 4, 3008, 100, encrypted[1358..2716]);
     try std.testing.expectEqual(@as(usize, 0), last.actions.len);
     last.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(?[]u8, null), machine.received_payload);
 }
 
 test "Direct rejects oversized reassembly before allocation" {

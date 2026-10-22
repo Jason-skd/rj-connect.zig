@@ -8,10 +8,18 @@ pub const AcceptResult = union(enum) {
     ignored,
     duplicate,
     buffered,
-    complete: struct {
-        id: u32,
-        bytes: []u8,
-    },
+    complete: Complete,
+};
+
+pub const CompleteStorage = enum {
+    caller,
+    reassembler,
+};
+
+pub const Complete = struct {
+    id: u32,
+    bytes: []u8,
+    storage: CompleteStorage,
 };
 
 const Classification = enum {
@@ -65,6 +73,13 @@ pub const Reassembler = struct {
         self.filled = total_len;
         self.last_id = id;
         self.expires_at = null;
+    }
+
+    /// Restores the pre-append length after a completed message cannot be committed.
+    pub fn rollbackAppend(self: *Reassembler, amount: usize) void {
+        if (self.buffer != null and amount <= self.filled) {
+            self.filled -= amount;
+        }
     }
 
     pub fn accepts(
@@ -158,7 +173,11 @@ pub const Reassembler = struct {
         const buffer = try self.allocator.alloc(u8, total_len);
         errdefer self.allocator.free(buffer);
         @memcpy(buffer, chunk);
-        return .{ .complete = .{ .id = id, .bytes = buffer } };
+        return .{ .complete = .{
+            .id = id,
+            .bytes = buffer,
+            .storage = .caller,
+        } };
     }
 
     fn acceptFirst(
@@ -176,12 +195,13 @@ pub const Reassembler = struct {
         errdefer self.allocator.free(buffer);
         @memcpy(buffer[0..chunk.len], chunk);
 
+        const expires_at = try addReassemblyTimeout(now);
         self.clear();
         self.buffer = buffer;
         self.total_len = total_len;
         self.filled = chunk.len;
         self.last_id = id;
-        self.expires_at = try addReassemblyTimeout(now);
+        self.expires_at = expires_at;
         return .buffered;
     }
 
@@ -212,11 +232,13 @@ pub const Reassembler = struct {
             return .ignored;
         }
 
-        const buffer = try self.allocator.alloc(u8, self.total_len);
-        errdefer self.allocator.free(buffer);
-        @memcpy(buffer[0..self.filled], existing[0..self.filled]);
-        @memcpy(buffer[self.filled..][0..chunk.len], chunk);
-        return .{ .complete = .{ .id = id, .bytes = buffer } };
+        @memcpy(existing[self.filled..][0..chunk.len], chunk);
+        self.filled = self.total_len;
+        return .{ .complete = .{
+            .id = id,
+            .bytes = existing,
+            .storage = .reassembler,
+        } };
     }
 
     fn clear(self: *Reassembler) void {
@@ -232,4 +254,42 @@ fn addReassemblyTimeout(now: std.Io.Timestamp) types.Error!std.Io.Timestamp {
     const result = @addWithOverflow(now.nanoseconds, 9 * std.time.ns_per_s);
     if (result[1] != 0) return error.TimestampOverflow;
     return .fromNanoseconds(result[0]);
+}
+
+test "reassembly reuses its initial buffer for the final fragment" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var value = Reassembler.init(failing.allocator(), 4096);
+    defer value.deinit();
+
+    const first: [wire.max_encrypted_chunk]u8 = @splat(0x11);
+    const last = [_]u8{ 0x22, 0x22 };
+    const total_len = first.len + last.len;
+    _ = try value.accept(1, 2, @intCast(total_len), &first, .fromNanoseconds(0));
+    const allocations_after_first = failing.alloc_index;
+
+    const completed = try value.accept(2, 4, @intCast(total_len), &last, .fromNanoseconds(0));
+    try std.testing.expectEqual(allocations_after_first, failing.alloc_index);
+    const complete = completed.complete;
+    try std.testing.expectEqual(CompleteStorage.reassembler, complete.storage);
+    try std.testing.expectEqual(total_len, complete.bytes.len);
+    try std.testing.expectEqualSlices(u8, &first, complete.bytes[0..first.len]);
+    try std.testing.expectEqualSlices(u8, &last, complete.bytes[first.len..]);
+
+    value.commitComplete(complete.id, complete.bytes.len);
+}
+
+test "reassembly allocation failure leaves delivery progress unchanged" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var value = Reassembler.init(failing.allocator(), 4096);
+    defer value.deinit();
+
+    failing.fail_index = failing.alloc_index;
+    const first: [wire.max_encrypted_chunk]u8 = @splat(0x11);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        value.accept(1, 2, 1360, &first, .fromNanoseconds(0)),
+    );
+    try std.testing.expectEqual(@as(?[]u8, null), value.buffer);
+    try std.testing.expectEqual(@as(?u32, null), value.last_id);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), value.nextDeadline());
 }
