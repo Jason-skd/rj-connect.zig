@@ -14,6 +14,13 @@ pub const AcceptResult = union(enum) {
     },
 };
 
+const Classification = enum {
+    ignored,
+    duplicate,
+    buffered,
+    complete,
+};
+
 pub const Reassembler = struct {
     allocator: std.mem.Allocator,
     max_message_size: usize,
@@ -39,6 +46,11 @@ pub const Reassembler = struct {
         return self.expires_at;
     }
 
+    pub fn incompleteTotal(self: *const Reassembler) ?usize {
+        if (self.buffer == null) return null;
+        return self.total_len;
+    }
+
     pub fn expire(self: *Reassembler, now: std.Io.Timestamp) bool {
         const deadline = self.expires_at orelse return false;
         if (now.compare(.lt, deadline)) return false;
@@ -55,6 +67,16 @@ pub const Reassembler = struct {
         self.expires_at = null;
     }
 
+    pub fn accepts(
+        self: *const Reassembler,
+        id: u32,
+        flags: u8,
+        total_len: u32,
+        chunk_len: usize,
+    ) bool {
+        return self.classify(id, flags, total_len, chunk_len) != .ignored;
+    }
+
     pub fn accept(
         self: *Reassembler,
         id: u32,
@@ -63,7 +85,31 @@ pub const Reassembler = struct {
         chunk: []const u8,
         now: std.Io.Timestamp,
     ) types.Error!AcceptResult {
-        if (chunk.len == 0 or chunk.len > wire.max_encrypted_chunk) return .ignored;
+        const total: usize = total_len;
+        switch (self.classify(id, flags, total_len, chunk.len)) {
+            .ignored => return .ignored,
+            .duplicate => return .duplicate,
+            .buffered => return switch (flags) {
+                2 => self.acceptFirst(id, total, chunk, now),
+                3 => self.acceptMiddle(id, total, chunk),
+                else => .ignored,
+            },
+            .complete => return switch (flags) {
+                1 => self.acceptSingle(id, total, chunk),
+                4 => self.acceptLast(id, total, chunk),
+                else => .ignored,
+            },
+        }
+    }
+
+    fn classify(
+        self: *const Reassembler,
+        id: u32,
+        flags: u8,
+        total_len: u32,
+        chunk_len: usize,
+    ) Classification {
+        if (chunk_len == 0 or chunk_len > wire.max_encrypted_chunk) return .ignored;
 
         if (self.last_id) |last_id| {
             if (id == last_id) return .duplicate;
@@ -72,16 +118,32 @@ pub const Reassembler = struct {
 
         const total: usize = total_len;
         if (total == 0 or total > self.max_message_size or total % 8 != 0 or
-            chunk.len > total)
+            chunk_len > total)
         {
             return .ignored;
         }
 
         return switch (flags) {
-            1 => self.acceptSingle(id, total, chunk),
-            2 => self.acceptFirst(id, total, chunk, now),
-            3 => self.acceptMiddle(id, total, chunk),
-            4 => self.acceptLast(id, total, chunk),
+            1 => if (chunk_len == total) .complete else .ignored,
+            2 => if (total > wire.max_encrypted_chunk and
+                chunk_len == wire.max_encrypted_chunk)
+                .buffered
+            else
+                .ignored,
+            3 => {
+                if (self.buffer == null or total != self.total_len or
+                    chunk_len != wire.max_encrypted_chunk or
+                    self.filled + chunk_len >= self.total_len)
+                {
+                    return .ignored;
+                }
+                return .buffered;
+            },
+            4 => if (self.buffer != null and total == self.total_len and
+                self.filled + chunk_len == self.total_len)
+                .complete
+            else
+                .ignored,
             else => .ignored,
         };
     }

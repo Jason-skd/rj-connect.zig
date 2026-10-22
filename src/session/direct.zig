@@ -203,6 +203,7 @@ pub const Machine = struct {
             now,
         );
         errdefer self.allocator.free(prepared.frame);
+        const ack_deadline = try time.addDuration(now, self.config.ack_timeout);
 
         var builder = OutcomeBuilder.init(self.allocator);
         errdefer builder.deinit();
@@ -221,7 +222,7 @@ pub const Machine = struct {
             .current_id = id,
             .attempts = 1,
         };
-        self.ack_deadline = try time.addDuration(now, self.config.ack_timeout);
+        self.ack_deadline = ack_deadline;
         return .{
             .actions = actions,
             .previous_phase = .{ .direct = .initializing },
@@ -402,9 +403,15 @@ pub const Machine = struct {
 
         const next_offset = outbound.offset + outbound.current_len;
         if (next_offset == outbound.total_len) {
-            self.timestamps = timestamp_update.state;
             switch (outbound.kind) {
-                .handshake => return self.beginUserInfo(now),
+                .handshake => {
+                    const previous_timestamps = self.timestamps;
+                    self.timestamps = timestamp_update.state;
+                    return self.beginUserInfo(now) catch |err| {
+                        self.timestamps = previous_timestamps;
+                        return err;
+                    };
+                },
                 .smp_hello => {
                     const smp_config = switch (self.config.mode) {
                         .smp => |value| value,
@@ -412,13 +419,15 @@ pub const Machine = struct {
                     };
                     const actions = try self.allocator.alloc(Action, 0);
                     errdefer self.allocator.free(actions);
-                    self.allocator.free(outbound.encrypted);
-                    self.outbound = null;
-                    self.ack_deadline = null;
-                    self.smp_initialization.?.response_deadline = try time.addDuration(
+                    const response_deadline = try time.addDuration(
                         now,
                         smp_config.request_timeout,
                     );
+                    self.timestamps = timestamp_update.state;
+                    self.allocator.free(outbound.encrypted);
+                    self.outbound = null;
+                    self.ack_deadline = null;
+                    self.smp_initialization.?.response_deadline = response_deadline;
                     return .{
                         .actions = actions,
                         .previous_phase = .{ .direct = .initializing },
@@ -431,6 +440,7 @@ pub const Machine = struct {
                 .smp_heartbeat => {
                     const actions = try self.allocator.alloc(Action, 0);
                     errdefer self.allocator.free(actions);
+                    self.timestamps = timestamp_update.state;
                     self.allocator.free(outbound.encrypted);
                     self.outbound = null;
                     self.ack_deadline = null;
@@ -446,13 +456,15 @@ pub const Machine = struct {
                 .sam_heartbeat => {
                     const actions = try self.allocator.alloc(Action, 0);
                     errdefer self.allocator.free(actions);
-                    self.allocator.free(outbound.encrypted);
-                    self.outbound = null;
-                    self.ack_deadline = null;
-                    self.heartbeat_deadline = if (self.config.heartbeat_interval.toNanoseconds() > 0)
+                    const heartbeat_deadline = if (self.config.heartbeat_interval.toNanoseconds() > 0)
                         try time.addDuration(now, self.config.heartbeat_interval)
                     else
                         null;
+                    self.timestamps = timestamp_update.state;
+                    self.allocator.free(outbound.encrypted);
+                    self.outbound = null;
+                    self.ack_deadline = null;
+                    self.heartbeat_deadline = heartbeat_deadline;
                     return .{
                         .actions = actions,
                         .previous_phase = .{ .direct = .active },
@@ -465,11 +477,13 @@ pub const Machine = struct {
                 .user_info => {
                     const actions = try self.allocator.alloc(Action, 0);
                     errdefer self.allocator.free(actions);
+                    const result_deadline = try time.addDuration(now, .fromSeconds(9));
+                    self.timestamps = timestamp_update.state;
                     self.allocator.free(outbound.encrypted);
                     self.outbound = null;
                     self.ack_deadline = null;
                     self.phase = .awaiting_result;
-                    self.result_deadline = try time.addDuration(now, .fromSeconds(9));
+                    self.result_deadline = result_deadline;
                     return .{
                         .actions = actions,
                         .previous_phase = .{ .direct = .initializing },
@@ -492,6 +506,7 @@ pub const Machine = struct {
             now,
         );
         errdefer self.allocator.free(prepared.frame);
+        const ack_deadline = try time.addDuration(now, self.config.ack_timeout);
         var builder = OutcomeBuilder.init(self.allocator);
         errdefer builder.deinit();
         try builder.addFrame(prepared.frame);
@@ -509,7 +524,7 @@ pub const Machine = struct {
             .current_id = id,
             .attempts = 1,
         };
-        self.ack_deadline = try time.addDuration(now, self.config.ack_timeout);
+        self.ack_deadline = ack_deadline;
         return .{
             .actions = actions,
             .previous_phase = .{ .direct = self.phase },
@@ -550,10 +565,18 @@ pub const Machine = struct {
         {
             return self.noop();
         }
+        if (!self.reassembler.accepts(
+            frame.header.id,
+            frame.header.flags,
+            frame.header.total_len,
+            frame.encrypted.len,
+        )) {
+            return self.noop();
+        }
 
         const complete_len: ?usize = switch (frame.header.flags) {
             1 => frame.header.total_len,
-            4 => if (self.reassembler.total_len == 0) null else self.reassembler.total_len,
+            4 => self.reassembler.incompleteTotal(),
             else => null,
         };
         const plaintext_buffer = if (complete_len) |len|
@@ -595,7 +618,9 @@ pub const Machine = struct {
                 if (plaintext_buffer) |buffer| self.allocator.free(buffer);
                 return self.noop();
             },
-            .duplicate, .buffered => {},
+            .duplicate, .buffered => {
+                if (plaintext_buffer) |buffer| self.allocator.free(buffer);
+            },
             .complete => |complete| {
                 if (plaintext_buffer) |plaintext| {
                     _ = des.decryptCbc(
@@ -721,9 +746,15 @@ pub const Machine = struct {
         now: std.Io.Timestamp,
         timestamps: TimestampState,
     ) Error!Outcome {
-        const combined = try self.allocator.alloc(Action, actions.len + 1);
+        const combined = self.allocator.alloc(Action, actions.len + 1) catch |err| {
+            session_outcome.freeActions(self.allocator, actions);
+            return err;
+        };
         errdefer self.allocator.free(combined);
+        const previous_timestamps = self.timestamps;
+        self.timestamps = timestamps;
         const user_info = self.beginUserInfo(now) catch |err| {
+            self.timestamps = previous_timestamps;
             session_outcome.freeActions(self.allocator, actions);
             return err;
         };
@@ -736,7 +767,6 @@ pub const Machine = struct {
         @memcpy(combined[actions.len..], user_info.actions);
         self.allocator.free(actions);
         self.allocator.free(user_info.actions);
-        self.timestamps = timestamps;
         self.smp_initialization = null;
         return .{
             .actions = combined,
@@ -889,6 +919,7 @@ pub const Machine = struct {
             now,
         );
         errdefer self.allocator.free(prepared.frame);
+        const ack_deadline = try time.addDuration(now, self.config.ack_timeout);
         var builder = OutcomeBuilder.init(self.allocator);
         errdefer builder.deinit();
         try builder.addFrame(prepared.frame);
@@ -896,7 +927,7 @@ pub const Machine = struct {
 
         self.timestamps = prepared.timestamps;
         self.outbound.?.attempts += 1;
-        self.ack_deadline = try time.addDuration(now, self.config.ack_timeout);
+        self.ack_deadline = ack_deadline;
         return .{
             .actions = actions,
             .previous_phase = .{ .direct = self.phase },
@@ -932,12 +963,13 @@ pub const Machine = struct {
                             if (self.smp_hello_failures >= 3) return try self.reauthRequired();
                         }
 
-                        var outcome = try self.beginSmpHello(.smp_heartbeat, now);
-                        self.smp_hello_pending = true;
-                        self.heartbeat_deadline = try time.addDuration(
+                        const next_heartbeat = try time.addDuration(
                             now,
                             self.config.heartbeat_interval,
                         );
+                        var outcome = try self.beginSmpHello(.smp_heartbeat, now);
+                        self.smp_hello_pending = true;
+                        self.heartbeat_deadline = next_heartbeat;
                         outcome.next_deadline = self.nextDeadline();
                         return outcome;
                     },
@@ -964,7 +996,7 @@ pub const Machine = struct {
     }
 
     fn handleSmpTimer(self: *Machine, now: std.Io.Timestamp) Error!?Outcome {
-        var state = &(self.smp_initialization orelse return null);
+        const state = if (self.smp_initialization) |*value| value else return null;
         if (!now.compare(.lt, state.initialization_deadline)) {
             return try self.smpInitializationTimeout();
         }
@@ -981,13 +1013,15 @@ pub const Machine = struct {
                     .smp => |value| value,
                     .sam => return null,
                 };
-                var outcome = try self.beginSmpHello(.smp_hello, now);
-                state.attempts += 1;
-                state.response_deadline = null;
-                state.next_request_at = if (state.attempts < 3)
+                const next_attempt = state.attempts + 1;
+                const next_request_at = if (next_attempt < 3)
                     try time.addDuration(now, smp_config.retry_interval)
                 else
                     null;
+                var outcome = try self.beginSmpHello(.smp_hello, now);
+                state.attempts = next_attempt;
+                state.response_deadline = null;
+                state.next_request_at = next_request_at;
                 outcome.next_deadline = self.nextDeadline();
                 return outcome;
             }
@@ -1295,6 +1329,112 @@ test "Direct retransmits the same fragment until attempts are exhausted" {
     try std.testing.expectEqual(@as(usize, 0), failed.actions.len);
 }
 
+test "Direct preserves retry progress when the next deadline cannot be represented" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    const encrypted = try std.testing.allocator.alloc(u8, 100);
+    @memset(encrypted, 0x34);
+    var initial = try machine.beginMessage(encrypted, .user_info, testTimestamp(0));
+    initial.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.TimestampOverflow, machine.step(
+        testTimestamp(std.math.maxInt(i96) - std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    ));
+    try std.testing.expectEqual(@as(u8, 1), machine.outbound.?.attempts);
+
+    var retried = try machine.step(
+        testTimestamp(6 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    defer retried.deinit(std.testing.allocator);
+    const frame = try wire.decodeFrame(retried.actions[0].send_frame);
+    try std.testing.expectEqual(@as(u64, 101), frame.header.timestamp);
+}
+
+test "Direct does not start a message when its ACK deadline cannot be represented" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    const encrypted = try std.testing.allocator.alloc(u8, 100);
+    defer std.testing.allocator.free(encrypted);
+    @memset(encrypted, 0x35);
+    const original_timestamps = machine.timestamps;
+    const original_message_id = machine.next_message_id;
+
+    try std.testing.expectError(error.TimestampOverflow, machine.beginMessage(
+        encrypted,
+        .user_info,
+        testTimestamp(std.math.maxInt(i96) - std.time.ns_per_s),
+    ));
+    try std.testing.expectEqual(original_timestamps, machine.timestamps);
+    try std.testing.expectEqual(original_message_id, machine.next_message_id);
+    try std.testing.expectEqual(@as(?Outbound, null), machine.outbound);
+}
+
+test "Direct does not advance to the next fragment when its ACK deadline cannot be represented" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    const encrypted = try std.testing.allocator.alloc(u8, 3008);
+    @memset(encrypted, 0x36);
+    var initial = try machine.beginMessage(encrypted, .user_info, testTimestamp(0));
+    const initial_frame = try wire.decodeFrame(initial.actions[0].send_frame);
+    initial.deinit(std.testing.allocator);
+
+    var ack_buffer: [256]u8 = undefined;
+    const ack = try encodeAckForFrame(&ack_buffer, initial_frame, config);
+    const original_timestamps = machine.timestamps;
+    const original_message_id = machine.next_message_id;
+    try std.testing.expectError(error.TimestampOverflow, machine.step(
+        testTimestamp(std.math.maxInt(i96) - std.time.ns_per_s),
+        .{ .frame = .{
+            .generation = machine.currentGeneration(),
+            .bytes = ack,
+        } },
+    ));
+
+    try std.testing.expectEqual(@as(u8, 2), machine.outbound.?.current_flags);
+    try std.testing.expectEqual(original_timestamps, machine.timestamps);
+    try std.testing.expectEqual(original_message_id, machine.next_message_id);
+}
+
+test "Direct retains user information until its result deadline can be represented" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    const encrypted = try std.testing.allocator.alloc(u8, 16);
+    @memset(encrypted, 0x37);
+    var initial = try machine.beginMessage(encrypted, .user_info, testTimestamp(0));
+    const initial_frame = try wire.decodeFrame(initial.actions[0].send_frame);
+    initial.deinit(std.testing.allocator);
+
+    var ack_buffer: [256]u8 = undefined;
+    const ack = try encodeAckForFrame(&ack_buffer, initial_frame, config);
+    const original_timestamps = machine.timestamps;
+    const original_deadline = machine.nextDeadline().?;
+    try std.testing.expectError(error.TimestampOverflow, machine.step(
+        testTimestamp(std.math.maxInt(i96) - std.time.ns_per_s),
+        .{ .frame = .{
+            .generation = machine.currentGeneration(),
+            .bytes = ack,
+        } },
+    ));
+
+    try std.testing.expectEqual(
+        types.ActivePhase{ .direct = .initializing },
+        machine.currentPhase(),
+    );
+    try std.testing.expectEqual(MessageKind.user_info, machine.outbound.?.kind);
+    try std.testing.expectEqual(original_timestamps, machine.timestamps);
+    try std.testing.expectEqual(original_deadline, machine.nextDeadline().?);
+}
+
 test "Direct acknowledges and decrypts a complete inbound message" {
     const config = testConfig();
     var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
@@ -1331,6 +1471,10 @@ test "Direct acknowledges and decrypts a complete inbound message" {
     try std.testing.expectEqual(@as(u16, wire.header_size), ack.header.packet_len);
     try std.testing.expectEqual(@as(u32, 0), ack.header.total_len);
     try std.testing.expectEqualSlices(u8, &plaintext, machine.received_payload.?);
+
+    var duplicate = try sendDataForTest(&machine, config, 1, 1, encrypted.len, 100, &encrypted);
+    try std.testing.expectEqual(@as(usize, 1), duplicate.actions.len);
+    duplicate.deinit(std.testing.allocator);
 }
 
 test "Direct reassembles only a complete ordered sequence" {
@@ -1421,6 +1565,42 @@ test "Direct rejects oversized reassembly before allocation" {
     defer rejected.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), rejected.actions.len);
     try std.testing.expectEqual(@as(?std.Io.Timestamp, null), machine.nextDeadline());
+}
+
+test "Direct drops a last fragment without a pending first fragment before allocation" {
+    const config = testConfig();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var machine = try Machine.init(failing.allocator(), config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    const encrypted = try std.testing.allocator.alloc(u8, 16);
+    defer std.testing.allocator.free(encrypted);
+    @memset(encrypted, 0x66);
+    var completed = try sendDataForTest(
+        &machine,
+        config,
+        1,
+        1,
+        @intCast(encrypted.len),
+        100,
+        encrypted,
+    );
+    completed.deinit(failing.allocator());
+
+    const fail_index = failing.alloc_index;
+    failing.fail_index = fail_index;
+    var missing_first = try sendDataForTest(
+        &machine,
+        config,
+        2,
+        4,
+        @intCast(encrypted.len),
+        100,
+        encrypted[0..8],
+    );
+    defer missing_first.deinit(failing.allocator());
+    try std.testing.expectEqual(@as(usize, 0), missing_first.actions.len);
+    try std.testing.expectEqual(fail_index, failing.alloc_index);
 }
 
 test "Direct timestamp modes reject timestamps outside their windows" {
@@ -1595,6 +1775,7 @@ test "Direct completes SMP initialization and authentication" {
     try std.testing.expectEqual(@as(usize, 2), hello_response.actions.len);
     const user_info_frame = try wire.decodeFrame(hello_response.actions[1].send_frame);
     try std.testing.expectEqual(@as(u8, 1), user_info_frame.header.code);
+    try std.testing.expectEqual(@as(u64, 101), user_info_frame.header.timestamp);
     hello_response.deinit(std.testing.allocator);
 
     var user_info_ack_buffer: [256]u8 = undefined;
@@ -1649,6 +1830,155 @@ test "Direct completes SMP initialization and authentication" {
     const auth = result.actions[1].direct_auth_result;
     try std.testing.expect(auth.success);
     try std.testing.expectEqualStrings("ok", auth.server_message_gbk.?);
+}
+
+test "Direct preserves the SMP timestamp watermark after sending user information" {
+    var config = testSmpConfig();
+    config.heartbeat_interval = .fromSeconds(5);
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    var started = try machine.start(testTimestamp(0));
+    try acknowledgeCurrentFrame(&machine, config, started.actions[0].send_frame, 0);
+    started.deinit(std.testing.allocator);
+
+    var hello_payload: [64]u8 = undefined;
+    const hello = try smp.encodeHello("alice", &.{ 1, 2, 3, 4 }, &hello_payload);
+    const hello_cipher_len = std.mem.alignForward(usize, hello.len, 8);
+    var padded_hello: [64]u8 = @splat(0);
+    @memcpy(padded_hello[0..hello.len], hello);
+    var hello_encrypted: [64]u8 = undefined;
+    _ = try des.encryptCbc(
+        config.des_key,
+        config.initial_iv,
+        padded_hello[0..hello_cipher_len],
+        &hello_encrypted,
+    );
+    var hello_response = try sendDataAtForTest(
+        &machine,
+        config,
+        40,
+        1,
+        @intCast(hello_cipher_len),
+        110,
+        hello_encrypted[0..hello_cipher_len],
+        testTimestamp(2 * std.time.ns_per_s),
+    );
+    defer hello_response.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), hello_response.actions.len);
+
+    const user_info_frame = try wire.decodeFrame(hello_response.actions[1].send_frame);
+    var user_info_ack_buffer: [256]u8 = undefined;
+    const user_info_ack = try encodeAckForFrame(
+        &user_info_ack_buffer,
+        user_info_frame,
+        config,
+    );
+    var waiting = try machine.step(
+        testTimestamp(3 * std.time.ns_per_s),
+        .{ .frame = .{
+            .generation = machine.currentGeneration(),
+            .bytes = user_info_ack,
+        } },
+    );
+    waiting.deinit(std.testing.allocator);
+
+    var result_payload: [16]u8 = @splat(0);
+    result_payload[0..13].* = .{
+        1,    0,    1,
+        0x2e, 0xce, 0,
+        1,    1,    0xcf,
+        0,    2,    'o',
+        'k',
+    };
+    var result_encrypted: [16]u8 = undefined;
+    _ = try des.encryptCbc(
+        config.des_key,
+        config.initial_iv,
+        &result_payload,
+        &result_encrypted,
+    );
+    var result = try sendDataAtForTest(
+        &machine,
+        config,
+        41,
+        1,
+        @intCast(result_encrypted.len),
+        111,
+        &result_encrypted,
+        testTimestamp(4 * std.time.ns_per_s),
+    );
+    result.deinit(std.testing.allocator);
+
+    var heartbeat = try machine.step(
+        testTimestamp(9 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    defer heartbeat.deinit(std.testing.allocator);
+    const heartbeat_frame = try wire.decodeFrame(heartbeat.actions[0].send_frame);
+    try std.testing.expectEqual(@as(u64, 102), heartbeat_frame.header.timestamp);
+}
+
+test "Direct releases the SMP response ACK when user information actions cannot be combined" {
+    const config = testSmpConfig();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var machine = try Machine.init(failing.allocator(), config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    var started = try machine.start(testTimestamp(0));
+    try acknowledgeCurrentFrameWithAllocator(
+        &machine,
+        config,
+        started.actions[0].send_frame,
+        0,
+        failing.allocator(),
+    );
+    started.deinit(failing.allocator());
+
+    var hello_payload: [64]u8 = undefined;
+    const hello = try smp.encodeHello("alice", &.{ 1, 2, 3, 4 }, &hello_payload);
+    const hello_cipher_len = std.mem.alignForward(usize, hello.len, 8);
+    var padded_hello: [64]u8 = @splat(0);
+    @memcpy(padded_hello[0..hello.len], hello);
+    var hello_encrypted: [64]u8 = undefined;
+    _ = try des.encryptCbc(
+        config.des_key,
+        config.initial_iv,
+        padded_hello[0..hello_cipher_len],
+        &hello_encrypted,
+    );
+    const deadline = machine.nextDeadline().?;
+
+    failing.fail_index = failing.alloc_index + 4;
+    try std.testing.expectError(error.OutOfMemory, sendDataAtForTest(
+        &machine,
+        config,
+        40,
+        1,
+        @intCast(hello_cipher_len),
+        110,
+        hello_encrypted[0..hello_cipher_len],
+        testTimestamp(2 * std.time.ns_per_s),
+    ));
+    try std.testing.expectEqual(
+        types.ActivePhase{ .direct = .initializing },
+        machine.currentPhase(),
+    );
+    try std.testing.expectEqual(deadline, machine.nextDeadline().?);
+
+    failing.fail_index = std.math.maxInt(usize);
+    var retried = try sendDataAtForTest(
+        &machine,
+        config,
+        40,
+        1,
+        @intCast(hello_cipher_len),
+        110,
+        hello_encrypted[0..hello_cipher_len],
+        testTimestamp(2 * std.time.ns_per_s),
+    );
+    defer retried.deinit(failing.allocator());
+    try std.testing.expectEqual(@as(usize, 2), retried.actions.len);
 }
 
 test "Direct honors a delayed first SMP hello" {
@@ -2144,6 +2474,22 @@ fn acknowledgeCurrentFrame(
     encoded: []const u8,
     now_seconds: i96,
 ) !void {
+    return acknowledgeCurrentFrameWithAllocator(
+        machine,
+        config,
+        encoded,
+        now_seconds,
+        std.testing.allocator,
+    );
+}
+
+fn acknowledgeCurrentFrameWithAllocator(
+    machine: *Machine,
+    config: types.DirectSessionConfig,
+    encoded: []const u8,
+    now_seconds: i96,
+    allocator: std.mem.Allocator,
+) !void {
     const frame = try wire.decodeFrame(encoded);
     var ack_buffer: [256]u8 = undefined;
     const ack = try encodeAckForFrame(&ack_buffer, frame, config);
@@ -2154,7 +2500,7 @@ fn acknowledgeCurrentFrame(
             .bytes = ack,
         } },
     );
-    acknowledged.deinit(std.testing.allocator);
+    acknowledged.deinit(allocator);
 }
 
 fn testTimestamp(nanoseconds: i96) std.Io.Timestamp {
