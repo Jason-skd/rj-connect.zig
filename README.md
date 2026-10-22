@@ -29,6 +29,7 @@ zig build test
 
 ## 文档索引
 
+- [锐捷协议研究报告](docs/rj-protocol/index.md)：EAPOL/EAP、私有字段、认证状态机、SAM/SMP 与密码学的可复刻规范。
 - [ROADMAP.md](ROADMAP.md)：成品目标、里程碑、验收条件与待确认项。
 - [CHANGELOG.md](CHANGELOG.md)：已交付能力和重要限制。
 - [AGENTS.md](AGENTS.md)：仓库协作与工程治理。
