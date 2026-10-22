@@ -1,5 +1,16 @@
 # Changelog
 
+## c92d95a
+
+### Added
+
+- 在 ROADMAP 中记录协议引擎的 `Session` API、allocator 与动作所有权、标准时间类型、统一输入事件、凭据边界和 PEAP 外部隧道边界。
+- 明确 EAPOL/EAP、EAP-MD5 状态机、直接通信和 PEAP 编排的实施顺序。
+
+### Limits
+
+- 本轮只形成实施契约，协议引擎和新的 codec 尚未实现。
+
 ## 4cbc51d
 
 ### Changed
