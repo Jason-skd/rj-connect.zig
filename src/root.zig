@@ -2,6 +2,9 @@
 const std = @import("std");
 const Io = std.Io;
 
+/// Protocol types and codecs shared by clients and tests.
+pub const protocol = @import("protocol/root.zig");
+
 /// This is a documentation comment to explain the `printAnotherMessage` function below.
 ///
 /// Accepting an `Io.Writer` instance is a handy way to write reusable code.
@@ -11,6 +14,10 @@ pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
 
 pub fn add(a: i32, b: i32) i32 {
     return a + b;
+}
+
+test {
+    _ = protocol;
 }
 
 test "basic add functionality" {
