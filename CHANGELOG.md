@@ -1,5 +1,30 @@
 # Changelog
 
+## 0d457f0
+
+### Changed
+
+- 将确定性会话从 wire codec 目录迁至 `src/session/`，包公开入口改为 `rj.session`；`protocol` 命名空间只保留无会话生命周期的字段和编解码能力。
+- 将阶段、deadline、EAP identifier、凭据等待、DHCP 完成和 peer 等运行时字段改为 tagged-union 状态，不再用相互独立的 optional 和布尔值描述同一状态。
+- 为 frame、timer 和外部结果增加 `Generation` 门控；新连接尝试会失效旧代次事件并返回 `error.StaleGeneration`。
+
+### Limits
+
+- `rj.protocol.session` 不再存在，调用方需要改用 `rj.session.Session`。
+- 当前仍未实现 PEAP 隧道输入，因此 M5 的 `tunnel_input` 不在本轮公开事件联合中。
+
+## 40a592d
+
+### Fixed
+
+- EAPOL logoff 清理完成后内部状态回到 `disconnected`，同时 `Outcome.phase` 仍为本次转换返回 `logoff`，便于调用方观察终止动作。
+
+## 8f703c2
+
+### Fixed
+
+- 认证失败次数不再因后续 EAP identifier 前进而清零，`max_auth_failures > 1` 时可以跨重连累计并在阈值后终止。
+
 ## 4d40f61
 
 ### Added
