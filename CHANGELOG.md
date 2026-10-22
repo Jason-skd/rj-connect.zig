@@ -1,5 +1,20 @@
 # Changelog
 
+## 4d40f61
+
+### Added
+
+- 新增 EAPOL Start、EAP 与 Logoff codec，校验 Ethernet/EAPOL 外层、EAP 长度、已知 code/type 和以太网填充边界。
+- 新增 EAP-MD5 Challenge 解码、Identity/Credential/Notification/NAK 响应构造，以及规范记录的 MD5 proof 已知答案实现。
+- 新增确定性 `protocol.session.Session`，由调用方提交绝对时间、报文、凭据、定时器和 DHCP 结果，返回拥有的发送报文、凭据请求、轮询动作、截止时间与失败原因。
+- 支持 connecting、acquired、authenticating、authenticated、held 和 logoff 状态，以及 held 重试、21 次 DHCP 轮询、第二认证和显式取消。
+- 新增旧 identifier、重复帧、非法状态、PEAP 未支持、时间倒退与分配失败的事务性行为覆盖。
+
+### Limits
+
+- 当前只覆盖标准 EAP-MD5 与 DHCP 第二认证编排；锐捷 EAP-MD5 私有载荷、PEAP、SAM/SMP 直接通信仍由后续里程碑负责。
+- 测试使用规范向量和注入事件，不代表目标校园网服务器的真实互操作结果。
+
 ## 46d55dc
 
 ### Changed

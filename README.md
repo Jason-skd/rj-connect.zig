@@ -18,6 +18,18 @@ zig build test
 
 通过 Zig 包模块 `mentohust_zig` 使用库。调用方向协议引擎提交已接收的报文、当前时间和外部认证结果，并消费引擎返回的待发送报文、超时截止时间和状态变化。
 
+```zig
+const rj = @import("mentohust_zig");
+
+var session = try rj.protocol.session.Session.init(allocator, .{
+    .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+});
+var outcome = try session.step(now, .start);
+defer outcome.deinit(allocator);
+```
+
+`protocol.eapol` 提供报文 codec，`protocol.session` 提供 EAP-MD5 认证与 DHCP 第二认证状态。发送动作中的帧由 `Outcome` 拥有，调用方完成发送后应释放。
+
 ## 开发验证
 
 提交前至少执行：
