@@ -1,6 +1,8 @@
 const std = @import("std");
+const des = @import("../protocol/des.zig");
 const eapol = @import("../protocol/eapol.zig");
 const direct = @import("../protocol/direct.zig");
+const smp = @import("../protocol/smp.zig");
 const session_api = @import("session.zig");
 
 const Action = session_api.Action;
@@ -909,6 +911,96 @@ test "Session cleans up Direct on remote Logoff without sending another" {
         error.InvalidState,
         value.step(timestamp(8 * std.time.ns_per_s), frameInput(&value, &logoff_frame)),
     );
+}
+
+test "Session ignores an SMP hello without complete business TLVs" {
+    var value = try authenticateEapMd5();
+    defer value.deinit();
+
+    const config = smpDirectConfig();
+    var started = try value.step(timestamp(6 * std.time.ns_per_s), .{
+        .direct_session = config,
+    });
+    const hello = try direct.decodeFrame(started.actions[0].send_frame);
+    var hello_ack_buffer: [256]u8 = undefined;
+    const hello_ack = try encodeAck(
+        &hello_ack_buffer,
+        hello.header.id,
+        hello.header.session_id,
+        hello.header.timestamp,
+        hello.destination,
+        hello.source,
+        config.des_key,
+        config.initial_iv,
+    );
+    started.deinit(std.testing.allocator);
+
+    var acknowledged = try value.step(
+        timestamp(7 * std.time.ns_per_s),
+        frameInput(&value, hello_ack),
+    );
+    acknowledged.deinit(std.testing.allocator);
+
+    var malformed_plaintext: [8]u8 = @splat(0);
+    malformed_plaintext[0..4].* = .{ 1, 0, 1, smp.hello_command };
+    var malformed_encrypted: [8]u8 = undefined;
+    _ = try des.encryptCbc(
+        config.des_key,
+        config.initial_iv,
+        &malformed_plaintext,
+        &malformed_encrypted,
+    );
+    var malformed_frame_buffer: [256]u8 = undefined;
+    const malformed_frame = try encodeData(
+        &malformed_frame_buffer,
+        40,
+        malformed_encrypted.len,
+        100,
+        &malformed_encrypted,
+        hello.destination,
+        hello.source,
+        config.des_key,
+        config.initial_iv,
+    );
+    var ignored = try value.step(
+        timestamp(7 * std.time.ns_per_s),
+        frameInput(&value, malformed_frame),
+    );
+    defer ignored.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase{ .direct = .initializing }, ignored.phase);
+    try std.testing.expectEqual(@as(usize, 1), ignored.actions.len);
+
+    var valid_payload_buffer: [64]u8 = undefined;
+    const valid_payload = try smp.encodeHello("alice", &.{ 1, 2, 3, 4 }, &valid_payload_buffer);
+    const encrypted_len = std.mem.alignForward(usize, valid_payload.len, 8);
+    var valid_plaintext: [64]u8 = @splat(0);
+    @memcpy(valid_plaintext[0..valid_payload.len], valid_payload);
+    var valid_encrypted: [64]u8 = undefined;
+    _ = try des.encryptCbc(
+        config.des_key,
+        config.initial_iv,
+        valid_plaintext[0..encrypted_len],
+        valid_encrypted[0..encrypted_len],
+    );
+    var valid_frame_buffer: [256]u8 = undefined;
+    const valid_frame = try encodeData(
+        &valid_frame_buffer,
+        41,
+        @intCast(encrypted_len),
+        101,
+        valid_encrypted[0..encrypted_len],
+        hello.destination,
+        hello.source,
+        config.des_key,
+        config.initial_iv,
+    );
+    var accepted = try value.step(
+        timestamp(7 * std.time.ns_per_s),
+        frameInput(&value, valid_frame),
+    );
+    defer accepted.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase{ .direct = .initializing }, accepted.phase);
+    try std.testing.expectEqual(@as(usize, 2), accepted.actions.len);
 }
 
 test "Session can re-enter EAP after an SMP Direct session ends" {

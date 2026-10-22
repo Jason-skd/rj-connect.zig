@@ -87,7 +87,20 @@ pub fn command(payload: []const u8) Error!u8 {
 
 pub fn isHello(payload: []const u8) bool {
     const value = command(payload) catch return false;
-    return value == hello_command;
+    if (value != hello_command) return false;
+
+    var offset: usize = 4;
+    var has_tlv = false;
+    while (offset < payload.len) {
+        if (allZero(payload[offset..])) break;
+        if (payload.len - offset < 3) return false;
+        const length: usize = std.mem.readInt(u16, payload[offset + 1 ..][0..2], .big);
+        offset += 3;
+        if (length > payload.len - offset) return false;
+        has_tlv = true;
+        offset += length;
+    }
+    return has_tlv;
 }
 
 /// Returns null when the payload is not a DHCP authentication result.
@@ -180,4 +193,29 @@ test "SMP codec rejects malformed framing" {
 
     const truncated = [_]u8{ 1, 0, 1, 0x2e, 0xce, 0, 2, 1 };
     try std.testing.expectError(error.InvalidTlv, parseDhcpAuthResult(&truncated));
+}
+
+test "SMP hello requires a complete business TLV" {
+    try std.testing.expect(!isHello(&.{ 1, 0, 1, hello_command }));
+    try std.testing.expect(!isHello(&.{
+        1,
+        0,
+        1,
+        hello_command,
+        0x02,
+        0,
+        4,
+        'x',
+    }));
+    try std.testing.expect(isHello(&.{
+        1,
+        0,
+        1,
+        hello_command,
+        0x02,
+        0,
+        1,
+        'x',
+        0,
+    }));
 }
