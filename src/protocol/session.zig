@@ -331,6 +331,7 @@ pub const Session = struct {
                 if (self.current_phase != .authenticating) return error.InvalidState;
                 if (self.network_completion_pending) return error.DuplicateFrame;
                 try self.validateTerminalIdentifier(eap.identifier);
+                self.auth_failures = 0;
                 if (self.config.dhcp_second_auth and self.dhcp_step == .first) {
                     self.network_completion_pending = true;
                     self.awaiting_dhcp_result = true;
@@ -362,7 +363,6 @@ pub const Session = struct {
                 return error.StaleIdentifier;
             }
             if (eap.identifier != identifier +% 1) return error.StaleIdentifier;
-            self.auth_failures = 0;
         }
         self.current_identifier = eap.identifier;
         self.last_inbound_type = eap.type;
@@ -797,6 +797,64 @@ test "Session holds server failures and logs off after the retry limit" {
     try std.testing.expectEqual(@as(usize, 1), logged_off.actions.len);
     const logoff = try eapol.decode(logged_off.actions[0].send_frame);
     try std.testing.expectEqual(eapol.PacketType.logoff, logoff.packet_type);
+}
+
+test "Session counts authentication failures across reconnects" {
+    var session = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .max_auth_failures = 2,
+        .held_timeout = .fromSeconds(5),
+    });
+    try prepareChallengeSession(&session);
+
+    const first_failure = terminalRequest(.failure, 0x17);
+    var first_held = try session.step(
+        timestamp(5 * std.time.ns_per_s),
+        .{ .frame = &first_failure },
+    );
+    try std.testing.expectEqual(FailureReason.server_failure, first_held.failure.?);
+    first_held.deinit(std.testing.allocator);
+
+    var retry = try session.step(timestamp(10 * std.time.ns_per_s), .timer);
+    retry.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Phase.connecting, session.phase());
+
+    const second_identity = identityRequest(0x18);
+    var acquired = try session.step(
+        timestamp(11 * std.time.ns_per_s),
+        .{ .frame = &second_identity },
+    );
+    acquired.deinit(std.testing.allocator);
+
+    var identified = try session.step(timestamp(12 * std.time.ns_per_s), .{
+        .credentials = .{ .username = "alice", .password = "" },
+    });
+    identified.deinit(std.testing.allocator);
+
+    const second_challenge = md5ChallengeRequest(0x19);
+    var challenged = try session.step(
+        timestamp(13 * std.time.ns_per_s),
+        .{ .frame = &second_challenge },
+    );
+    challenged.deinit(std.testing.allocator);
+
+    var answered = try session.step(timestamp(14 * std.time.ns_per_s), .{
+        .credentials = .{ .username = "alice", .password = "" },
+    });
+    answered.deinit(std.testing.allocator);
+
+    const second_failure = terminalRequest(.failure, 0x19);
+    var second_held = try session.step(
+        timestamp(15 * std.time.ns_per_s),
+        .{ .frame = &second_failure },
+    );
+    try std.testing.expectEqual(Phase.held, session.phase());
+    second_held.deinit(std.testing.allocator);
+
+    var logged_off = try session.step(timestamp(20 * std.time.ns_per_s), .timer);
+    defer logged_off.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Phase.logoff, logged_off.phase);
+    try std.testing.expectEqual(FailureReason.server_failure, logged_off.failure.?);
 }
 
 test "Session distinguishes authentication timeout and retries connecting" {
