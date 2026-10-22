@@ -601,11 +601,15 @@ pub const Machine = struct {
                     _ = des.decryptCbc(
                         self.config.des_key,
                         self.config.initial_iv,
-                        complete,
+                        complete.bytes,
                         plaintext,
                     ) catch {
                         self.allocator.free(plaintext);
-                        self.allocator.free(complete);
+                        self.reassembler.commitComplete(
+                            complete.id,
+                            complete.bytes.len,
+                        );
+                        self.allocator.free(complete.bytes);
                         self.timestamps = timestamp_update.state;
                         return .{
                             .actions = actions,
@@ -617,22 +621,34 @@ pub const Machine = struct {
                         };
                     };
                     const auth_result: ?sam.DhcpAuthResult = switch (self.config.mode) {
-                        .sam => sam.parseDhcpAuthResult(plaintext) catch null,
+                        .sam => if (self.phase == .awaiting_result)
+                            sam.parseDhcpAuthResult(plaintext) catch null
+                        else
+                            null,
                         .smp => blk: {
                             if (smp.isHello(plaintext) and self.smp_initialization != null) {
-                                self.allocator.free(complete);
                                 const outcome = self.acceptSmpHello(
                                     actions,
                                     now,
                                     timestamp_update.state,
                                 ) catch |err| {
+                                    self.allocator.free(complete.bytes);
                                     return err;
                                 };
+                                self.reassembler.commitComplete(
+                                    complete.id,
+                                    complete.bytes.len,
+                                );
+                                self.allocator.free(complete.bytes);
                                 self.allocator.free(plaintext);
                                 return outcome;
                             }
                             if (smp.isHello(plaintext) and self.phase == .active) {
-                                self.allocator.free(complete);
+                                self.reassembler.commitComplete(
+                                    complete.id,
+                                    complete.bytes.len,
+                                );
+                                self.allocator.free(complete.bytes);
                                 self.allocator.free(plaintext);
                                 self.timestamps = timestamp_update.state;
                                 self.smp_hello_pending = false;
@@ -646,7 +662,10 @@ pub const Machine = struct {
                                     .generation = self.generation,
                                 };
                             }
-                            const result = smp.parseDhcpAuthResult(plaintext) catch null;
+                            const result = if (self.phase == .awaiting_result)
+                                smp.parseDhcpAuthResult(plaintext) catch null
+                            else
+                                null;
                             if (result) |value| {
                                 break :blk .{
                                     .success = value.success,
@@ -657,22 +676,31 @@ pub const Machine = struct {
                         },
                     };
                     if (auth_result) |result| {
-                        self.allocator.free(complete);
                         const outcome = self.completeWithSamResult(
                             actions,
                             result,
                             timestamp_update.state,
                             now,
                         ) catch |err| {
+                            self.allocator.free(complete.bytes);
                             return err;
                         };
+                        self.reassembler.commitComplete(
+                            complete.id,
+                            complete.bytes.len,
+                        );
+                        self.allocator.free(complete.bytes);
                         self.allocator.free(plaintext);
                         return outcome;
                     }
+                    self.reassembler.commitComplete(
+                        complete.id,
+                        complete.bytes.len,
+                    );
                     if (self.received_payload) |previous| self.allocator.free(previous);
                     self.received_payload = plaintext;
                 }
-                self.allocator.free(complete);
+                self.allocator.free(complete.bytes);
             },
         }
 
@@ -693,13 +721,23 @@ pub const Machine = struct {
         now: std.Io.Timestamp,
         timestamps: TimestampState,
     ) Error!Outcome {
-        self.timestamps = timestamps;
-        self.smp_initialization = null;
+        const combined = try self.allocator.alloc(Action, actions.len + 1);
+        errdefer self.allocator.free(combined);
         const user_info = self.beginUserInfo(now) catch |err| {
             session_outcome.freeActions(self.allocator, actions);
             return err;
         };
-        const combined = try combineActionSlices(self.allocator, actions, user_info.actions);
+        if (user_info.actions.len != 1) {
+            session_outcome.freeActions(self.allocator, actions);
+            session_outcome.freeActions(self.allocator, user_info.actions);
+            return error.InvalidState;
+        }
+        @memcpy(combined[0..actions.len], actions);
+        @memcpy(combined[actions.len..], user_info.actions);
+        self.allocator.free(actions);
+        self.allocator.free(user_info.actions);
+        self.timestamps = timestamps;
+        self.smp_initialization = null;
         return .{
             .actions = combined,
             .previous_phase = .{ .direct = .initializing },
@@ -717,6 +755,20 @@ pub const Machine = struct {
         timestamps: TimestampState,
         now: std.Io.Timestamp,
     ) Error!Outcome {
+        var actions_owned = true;
+        errdefer if (actions_owned) session_outcome.freeActions(self.allocator, actions);
+
+        const heartbeat_deadline = if (result.success and
+            self.config.heartbeat_interval.toNanoseconds() > 0)
+            try time.addDuration(now, self.config.heartbeat_interval)
+        else
+            null;
+        const reauth_deadline = if (result.success and
+            self.config.reauth_interval.toNanoseconds() > 0)
+            try time.addDuration(now, self.config.reauth_interval)
+        else
+            null;
+
         const message = if (result.message_gbk.len == 0)
             null
         else
@@ -724,29 +776,25 @@ pub const Machine = struct {
         errdefer if (message) |value| self.allocator.free(value);
 
         const combined = self.allocator.alloc(Action, 2) catch |err| {
-            session_outcome.freeActions(self.allocator, actions);
             return err;
         };
-        errdefer self.allocator.free(combined);
+        var combined_owned = true;
+        errdefer if (combined_owned) session_outcome.freeActions(self.allocator, combined);
         combined[0] = actions[0];
         combined[1] = .{ .direct_auth_result = .{
             .success = result.success,
             .server_message_gbk = message,
         } };
         self.allocator.free(actions);
+        actions_owned = false;
 
         self.timestamps = timestamps;
         self.result_deadline = null;
         if (result.success) {
-            self.heartbeat_deadline = if (self.config.heartbeat_interval.toNanoseconds() > 0)
-                try time.addDuration(now, self.config.heartbeat_interval)
-            else
-                null;
-            self.reauth_deadline = if (self.config.reauth_interval.toNanoseconds() > 0)
-                try time.addDuration(now, self.config.reauth_interval)
-            else
-                null;
+            self.heartbeat_deadline = heartbeat_deadline;
+            self.reauth_deadline = reauth_deadline;
             self.phase = .active;
+            combined_owned = false;
             return .{
                 .actions = combined,
                 .previous_phase = .{ .direct = .awaiting_result },
@@ -758,6 +806,7 @@ pub const Machine = struct {
         }
 
         self.phase = .initializing;
+        combined_owned = false;
         return .{
             .actions = combined,
             .previous_phase = .{ .direct = .awaiting_result },
@@ -1146,23 +1195,6 @@ fn minimumDeadline(
     if (first == null) return second;
     if (second == null) return first;
     return if (first.?.compare(.lt, second.?)) first.? else second.?;
-}
-
-fn combineActionSlices(
-    allocator: std.mem.Allocator,
-    first: []Action,
-    second: []Action,
-) Error![]Action {
-    const combined = allocator.alloc(Action, first.len + second.len) catch |err| {
-        session_outcome.freeActions(allocator, first);
-        session_outcome.freeActions(allocator, second);
-        return err;
-    };
-    @memcpy(combined[0..first.len], first);
-    @memcpy(combined[first.len..], second);
-    allocator.free(first);
-    allocator.free(second);
-    return combined;
 }
 
 fn encryptPayload(
@@ -1768,6 +1800,117 @@ test "Direct requires three unanswered SMP hello intervals" {
     defer reauth.deinit(std.testing.allocator);
     try std.testing.expectEqual(types.ActivePhase.idle, reauth.phase);
     try std.testing.expectEqual(Action.reauth_required, reauth.actions[0]);
+}
+
+test "Direct preserves SAM handshake progress when user info allocation fails" {
+    const config = testConfig();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var machine = try Machine.init(failing.allocator(), config, testTimestamp(0), .initial);
+    defer machine.deinit();
+
+    var started = try machine.start(testTimestamp(0));
+    const frame = try wire.decodeFrame(started.actions[0].send_frame);
+    var ack_buffer: [256]u8 = undefined;
+    const ack = try encodeAckForFrame(&ack_buffer, frame, config);
+    started.deinit(failing.allocator());
+    const original_deadline = machine.nextDeadline().?;
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, machine.step(
+        testTimestamp(std.time.ns_per_s),
+        .{ .frame = .{
+            .generation = machine.currentGeneration(),
+            .bytes = ack,
+        } },
+    ));
+    try std.testing.expectEqual(
+        types.ActivePhase{ .direct = .initializing },
+        machine.currentPhase(),
+    );
+    try std.testing.expectEqual(MessageKind.handshake, machine.outbound.?.kind);
+    try std.testing.expectEqual(original_deadline, machine.nextDeadline().?);
+
+    failing.fail_index = std.math.maxInt(usize);
+    var retried = try machine.step(
+        testTimestamp(std.time.ns_per_s),
+        .{ .frame = .{
+            .generation = machine.currentGeneration(),
+            .bytes = ack,
+        } },
+    );
+    defer retried.deinit(failing.allocator());
+    try std.testing.expectEqual(@as(usize, 1), retried.actions.len);
+    try std.testing.expectEqual(MessageKind.user_info, machine.outbound.?.kind);
+}
+
+test "Direct does not commit a SAM result when result allocation fails" {
+    const config = testConfig();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var machine = try Machine.init(failing.allocator(), config, testTimestamp(0), .initial);
+    defer machine.deinit();
+    try enterAwaitingResult(&machine, config);
+
+    var payload: [16]u8 = @splat(0);
+    payload[0..13].* = .{
+        1,    1,   12,
+        0x09, 8,   0x02,
+        2,    'o', 'k',
+        0x13, 1,   1,
+        0,
+    };
+    var encrypted: [16]u8 = undefined;
+    _ = try des.encryptCbc(config.des_key, config.initial_iv, &payload, &encrypted);
+    var frame_buffer: [256]u8 = undefined;
+    const frame = try encodeDataForTest(
+        &frame_buffer,
+        config,
+        70,
+        1,
+        encrypted.len,
+        100,
+        &encrypted,
+    );
+    const original_deadline = machine.nextDeadline().?;
+
+    failing.fail_index = failing.alloc_index + 4;
+    try std.testing.expectError(error.OutOfMemory, machine.step(
+        testTimestamp(std.time.ns_per_s),
+        .{ .frame = .{
+            .generation = machine.currentGeneration(),
+            .bytes = frame,
+        } },
+    ));
+    try std.testing.expectEqual(
+        types.ActivePhase{ .direct = .awaiting_result },
+        machine.currentPhase(),
+    );
+    try std.testing.expectEqual(original_deadline, machine.nextDeadline().?);
+
+    failing.fail_index = std.math.maxInt(usize);
+    var retried = try machine.step(
+        testTimestamp(std.time.ns_per_s),
+        .{ .frame = .{
+            .generation = machine.currentGeneration(),
+            .bytes = frame,
+        } },
+    );
+    defer retried.deinit(failing.allocator());
+    try std.testing.expectEqual(
+        types.ActivePhase{ .direct = .active },
+        retried.phase,
+    );
+    try std.testing.expectEqual(@as(usize, 2), retried.actions.len);
+}
+
+test "Direct config copy failure leaves no partial machine" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, Machine.init(
+        failing.allocator(),
+        testConfig(),
+        testTimestamp(0),
+        .initial,
+    ));
 }
 
 fn testConfig() types.DirectSessionConfig {

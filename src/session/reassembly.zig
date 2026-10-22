@@ -8,7 +8,10 @@ pub const AcceptResult = union(enum) {
     ignored,
     duplicate,
     buffered,
-    complete: []u8,
+    complete: struct {
+        id: u32,
+        bytes: []u8,
+    },
 };
 
 pub const Reassembler = struct {
@@ -41,6 +44,15 @@ pub const Reassembler = struct {
         if (now.compare(.lt, deadline)) return false;
         self.clear();
         return true;
+    }
+
+    pub fn commitComplete(self: *Reassembler, id: u32, total_len: usize) void {
+        if (self.buffer) |buffer| self.allocator.free(buffer);
+        self.buffer = null;
+        self.total_len = total_len;
+        self.filled = total_len;
+        self.last_id = id;
+        self.expires_at = null;
     }
 
     pub fn accept(
@@ -84,13 +96,7 @@ pub const Reassembler = struct {
         const buffer = try self.allocator.alloc(u8, total_len);
         errdefer self.allocator.free(buffer);
         @memcpy(buffer, chunk);
-
-        self.clear();
-        self.last_id = id;
-        self.total_len = total_len;
-        self.filled = total_len;
-        self.expires_at = null;
-        return .{ .complete = buffer };
+        return .{ .complete = .{ .id = id, .bytes = buffer } };
     }
 
     fn acceptFirst(
@@ -139,17 +145,16 @@ pub const Reassembler = struct {
         total_len: usize,
         chunk: []const u8,
     ) types.Error!AcceptResult {
-        const buffer = self.buffer orelse return .ignored;
+        const existing = self.buffer orelse return .ignored;
         if (total_len != self.total_len or self.filled + chunk.len != self.total_len) {
             return .ignored;
         }
 
+        const buffer = try self.allocator.alloc(u8, self.total_len);
+        errdefer self.allocator.free(buffer);
+        @memcpy(buffer[0..self.filled], existing[0..self.filled]);
         @memcpy(buffer[self.filled..][0..chunk.len], chunk);
-        self.buffer = null;
-        self.filled = self.total_len;
-        self.last_id = id;
-        self.expires_at = null;
-        return .{ .complete = buffer };
+        return .{ .complete = .{ .id = id, .bytes = buffer } };
     }
 
     fn clear(self: *Reassembler) void {

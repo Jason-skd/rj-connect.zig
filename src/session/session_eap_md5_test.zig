@@ -866,6 +866,72 @@ test "Session starts SAM direct communication and accepts its ACK" {
         error.InvalidState,
         value.step(timestamp(11 * std.time.ns_per_s), .cancel),
     );
+
+    const canceled_generation = canceled.generation;
+    var restarted = try value.step(timestamp(12 * std.time.ns_per_s), .start);
+    defer restarted.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase.idle, restarted.previous_phase);
+    try std.testing.expectEqual(Phase.connecting, restarted.phase);
+    try std.testing.expect(!canceled_generation.eql(restarted.generation));
+    try std.testing.expectError(
+        error.StaleGeneration,
+        value.step(
+            timestamp(13 * std.time.ns_per_s),
+            .{ .timer = canceled_generation },
+        ),
+    );
+}
+
+test "Session cleans up Direct on remote Logoff without sending another" {
+    var value = try authenticateEapMd5();
+    defer value.deinit();
+
+    var started = try value.step(timestamp(6 * std.time.ns_per_s), .{
+        .direct_session = samDirectConfig(),
+    });
+    started.deinit(std.testing.allocator);
+
+    var logoff_frame: [eapol.header_size]u8 = undefined;
+    eapol.encodeLogoff(
+        .{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff },
+        .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        &logoff_frame,
+    );
+    var logged_off = try value.step(
+        timestamp(7 * std.time.ns_per_s),
+        frameInput(&value, &logoff_frame),
+    );
+    defer logged_off.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase.idle, logged_off.phase);
+    try std.testing.expectEqual(FailureReason.server_logoff, logged_off.failure.?);
+    try std.testing.expectEqual(@as(usize, 0), logged_off.actions.len);
+    try std.testing.expectError(
+        error.InvalidState,
+        value.step(timestamp(8 * std.time.ns_per_s), frameInput(&value, &logoff_frame)),
+    );
+}
+
+test "Session can re-enter EAP after an SMP Direct session ends" {
+    var value = try authenticateEapMd5();
+    defer value.deinit();
+
+    var started = try value.step(timestamp(6 * std.time.ns_per_s), .{
+        .direct_session = smpDirectConfig(),
+    });
+    started.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        ActivePhase{ .direct = .initializing },
+        value.phase(),
+    );
+
+    var canceled = try value.step(timestamp(7 * std.time.ns_per_s), .cancel);
+    canceled.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase.idle, value.phase());
+
+    var restarted = try value.step(timestamp(8 * std.time.ns_per_s), .start);
+    defer restarted.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Phase.connecting, restarted.phase);
+    try std.testing.expectEqual(@as(usize, 1), restarted.actions.len);
 }
 
 fn encodeAck(
@@ -919,4 +985,52 @@ fn encodeData(
     }, encrypted, sender, receiver, output);
     try direct.setAuthenticator(encoded, key, iv);
     return encoded;
+}
+
+fn authenticateEapMd5() !Session {
+    var value = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+    });
+    errdefer value.deinit();
+    try prepareChallengeSession(&value);
+    const success = terminalRequest(.success, 0x17);
+    var authenticated = try value.step(
+        timestamp(5 * std.time.ns_per_s),
+        frameInput(&value, &success),
+    );
+    authenticated.deinit(std.testing.allocator);
+    return value;
+}
+
+fn samDirectConfig() session_api.DirectSessionConfig {
+    return .{
+        .mode = .{ .sam = .{
+            .session_parameter = .{ 1, 2, 3, 4 },
+            .endpoint_parameter = .{ 5, 6, 7, 8, 9, 10 },
+        } },
+        .peer_mac = .{ 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb },
+        .peer_ipv4 = .{ 192, 0, 2, 1 },
+        .peer_udp_port = 5678,
+        .local_udp_port = 1234,
+        .session_id = 0x1122_3344,
+        .des_key = .{ 0, 1, 2, 3, 4, 5, 6, 7 },
+        .initial_iv = .{ 8, 9, 10, 11, 12, 13, 14, 15 },
+        .timestamp = .{ .monotonic = 100 },
+        .username_gbk = "alice",
+        .network = .{
+            .ipv4 = .{ 192, 0, 2, 10 },
+            .netmask = .{ 255, 255, 255, 0 },
+            .gateway = .{ 192, 0, 2, 1 },
+            .dns = .{ 203, 0, 113, 53 },
+            .mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        },
+    };
+}
+
+fn smpDirectConfig() session_api.DirectSessionConfig {
+    var config = samDirectConfig();
+    config.mode = .{ .smp = .{
+        .session_parameter = .{ 1, 2, 3, 4 },
+    } };
+    return config;
 }
