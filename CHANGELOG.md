@@ -13,11 +13,19 @@
 - 新增拥有型 `direct_auth_result` 与 `reauth_required` 动作；GBK 服务器文本由调用方通过 `Outcome.deinit` 释放。
 - 新增本地取消、远端 Logoff、协议机释放、`Session.deinit` 和关键分配失败的事务性覆盖。
 
+### Fixed
+
+- 服务器时间换算使用检查减法；超出 `Timestamp` 表示范围时返回 `TimestampOverflow`，不再触发安全模式崩溃。
+- SMP hello 响应必须包含完整的业务 TLV 序列；仅含固定头或截断 TLV 的响应不会完成初始化。
+- 多片消息重组不再额外分配完整副本，避免峰值内存随完整消息大小翻倍。
+- 移除了不参与行为的 `max_version` 配置以及只被测试读取的生产状态。
+
 ### Changed
 
 - 公开阶段由单一 `Phase` 改为 `ActivePhase`，EAP-MD5 使用 `EapMd5Phase`，Direct 使用 `DirectPhase`。
 - `Session` 现在必须显式 `deinit`；`frame` 事件可承载 EAPOL 或完整 Direct Ethernet 帧，并按 EtherType 分流。
 - Direct 会话只能通过 EAP 已认证状态上的显式 `direct_session` 事件启动。SAM/SMP 配置和 GBK 用户名在提交时复制。
+- Zig 包模块导入名改为 `rj-connect`，构建图只产生库模块测试，不再安装模板可执行程序。
 
 ### Limits
 
