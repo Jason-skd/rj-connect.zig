@@ -235,10 +235,15 @@ pub const Session = struct {
 
         const actions = try builder.finish();
         self.* = next;
+        const outcome_phase: Phase = if (previous_phase != .disconnected and
+            next.current_phase == .disconnected)
+            .logoff
+        else
+            next.current_phase;
         return .{
             .actions = actions,
             .previous_phase = previous_phase,
-            .phase = next.current_phase,
+            .phase = outcome_phase,
             .next_deadline = next.current_deadline,
             .failure = next.failure_reason,
         };
@@ -562,7 +567,7 @@ pub const Session = struct {
     }
 
     fn enterLogoffState(self: *Session) Error!void {
-        self.current_phase = .logoff;
+        self.current_phase = .disconnected;
         self.current_deadline = null;
         self.challenge = null;
         self.pending_credentials = null;
@@ -926,6 +931,22 @@ test "Session cancellation and server Logoff terminate without duplicate cleanup
     try std.testing.expectEqual(Phase.logoff, remote_logoff.phase);
     try std.testing.expectEqual(FailureReason.server_logoff, remote_logoff.failure.?);
     try std.testing.expectEqual(@as(usize, 0), remote_logoff.actions.len);
+}
+
+test "Session becomes disconnected after logoff cleanup" {
+    var session = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+    });
+    var started = try session.step(timestamp(0), .start);
+    started.deinit(std.testing.allocator);
+
+    var canceled = try session.step(timestamp(std.time.ns_per_s), .cancel);
+    try std.testing.expectEqual(Phase.logoff, canceled.phase);
+    canceled.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(Phase.disconnected, session.phase());
+    try std.testing.expectEqual(FailureReason.canceled, session.failure().?);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), session.nextDeadline());
 }
 
 test "Session rejects stale and duplicate frames without changing state" {
