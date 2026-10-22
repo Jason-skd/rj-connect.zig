@@ -76,6 +76,8 @@ pub const FailureReason = enum {
     dhcp_timeout,
     server_logoff,
     direct_send_failed,
+    direct_result_rejected,
+    direct_result_timeout,
 };
 
 pub const DhcpStep = enum(u8) {
@@ -156,6 +158,11 @@ pub const DirectSessionConfig = struct {
             return error.InvalidConfig;
         }
     }
+};
+
+pub const DirectAuthResult = struct {
+    success: bool,
+    server_message_gbk: ?[]u8,
 };
 
 /// Byte slices in an input event are borrowed and must remain valid for one call only.

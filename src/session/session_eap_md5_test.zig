@@ -780,7 +780,79 @@ test "Session starts SAM direct communication and accepts its ACK" {
     );
     defer acknowledged.deinit(std.testing.allocator);
     try std.testing.expectEqual(ActivePhase{ .direct = .initializing }, acknowledged.phase);
-    try std.testing.expectEqual(@as(usize, 0), acknowledged.actions.len);
+    try std.testing.expectEqual(@as(usize, 1), acknowledged.actions.len);
+    try std.testing.expectEqual(timestamp(10 * std.time.ns_per_s), value.nextDeadline().?);
+
+    const user_info_frame = try direct.decodeFrame(acknowledged.actions[0].send_frame);
+    var user_info_plaintext: [256]u8 = undefined;
+    const user_info_len = try @import("../protocol/des.zig").decryptCbc(
+        des_key,
+        initial_iv,
+        user_info_frame.encrypted,
+        &user_info_plaintext,
+    );
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 8 }, user_info_plaintext[0..3]);
+    try std.testing.expect(user_info_len >= 3);
+
+    var user_ack_buffer: [256]u8 = undefined;
+    const user_ack = try encodeAck(
+        &user_ack_buffer,
+        user_info_frame.header.id,
+        user_info_frame.header.session_id,
+        user_info_frame.header.timestamp,
+        user_info_frame.destination,
+        user_info_frame.source,
+        des_key,
+        initial_iv,
+    );
+    var waiting = try value.step(
+        timestamp(8 * std.time.ns_per_s),
+        frameInput(&value, user_ack),
+    );
+    defer waiting.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        ActivePhase{ .direct = .awaiting_result },
+        waiting.phase,
+    );
+    try std.testing.expectEqual(timestamp(17 * std.time.ns_per_s), value.nextDeadline().?);
+
+    var result_payload: [16]u8 = @splat(0);
+    result_payload[0..13].* = .{
+        1,    1,   12,
+        0x09, 8,   0x02,
+        2,    'o', 'k',
+        0x13, 1,   1,
+        0,
+    };
+    var result_encrypted: [16]u8 = undefined;
+    _ = try @import("../protocol/des.zig").encryptCbc(
+        des_key,
+        initial_iv,
+        &result_payload,
+        &result_encrypted,
+    );
+    var result_frame_buffer: [256]u8 = undefined;
+    const result_frame = try encodeData(
+        &result_frame_buffer,
+        77,
+        result_encrypted.len,
+        101,
+        &result_encrypted,
+        user_info_frame.destination,
+        user_info_frame.source,
+        des_key,
+        initial_iv,
+    );
+    var completed = try value.step(
+        timestamp(9 * std.time.ns_per_s),
+        frameInput(&value, result_frame),
+    );
+    defer completed.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase{ .direct = .active }, completed.phase);
+    try std.testing.expectEqual(@as(usize, 2), completed.actions.len);
+    const auth = completed.actions[1].direct_auth_result;
+    try std.testing.expect(auth.success);
+    try std.testing.expectEqualStrings("ok", auth.server_message_gbk.?);
     try std.testing.expectEqual(@as(?std.Io.Timestamp, null), value.nextDeadline());
 }
 
@@ -806,6 +878,33 @@ fn encodeAck(
         .flags = 0,
         .total_len = 0,
     }, &.{}, sender, receiver, output);
+    try direct.setAuthenticator(encoded, key, iv);
+    return encoded;
+}
+
+fn encodeData(
+    output: []u8,
+    id: u32,
+    total_len: u32,
+    direct_timestamp: u64,
+    encrypted: []const u8,
+    sender: direct.Endpoint,
+    receiver: direct.Endpoint,
+    key: [8]u8,
+    iv: [8]u8,
+) ![]u8 {
+    const encoded = try direct.encodeFrame(.{
+        .version = 1,
+        .code = 1,
+        .id = id,
+        .packet_len = @intCast(direct.header_size + encrypted.len),
+        .authenticator = @splat(0),
+        .session_id = 0x1122_3344,
+        .timestamp = direct_timestamp,
+        .message_type = 1,
+        .flags = 1,
+        .total_len = total_len,
+    }, encrypted, sender, receiver, output);
     try direct.setAuthenticator(encoded, key, iv);
     return encoded;
 }

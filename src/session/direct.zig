@@ -3,6 +3,7 @@
 const std = @import("std");
 const des = @import("../protocol/des.zig");
 const wire = @import("../protocol/direct.zig");
+const sam = @import("../protocol/sam.zig");
 const reassembly = @import("reassembly.zig");
 const session_outcome = @import("outcome.zig");
 const time = @import("time.zig");
@@ -40,6 +41,7 @@ const Fragment = struct {
 };
 
 const Outbound = struct {
+    kind: MessageKind,
     encrypted: []u8,
     total_len: usize,
     offset: usize,
@@ -47,6 +49,11 @@ const Outbound = struct {
     current_flags: u8,
     current_id: u32,
     attempts: u8,
+};
+
+const MessageKind = enum {
+    handshake,
+    user_info,
 };
 
 const PreparedFragment = struct {
@@ -63,6 +70,7 @@ pub const Machine = struct {
     next_message_id: u32,
     outbound: ?Outbound = null,
     ack_deadline: ?std.Io.Timestamp = null,
+    result_deadline: ?std.Io.Timestamp = null,
     reassembler: reassembly.Reassembler,
     received_payload: ?[]u8 = null,
 
@@ -116,21 +124,32 @@ pub const Machine = struct {
     }
 
     pub fn nextDeadline(self: *const Machine) ?std.Io.Timestamp {
-        return minimumDeadline(self.ack_deadline, self.reassembler.nextDeadline());
+        return minimumDeadline(
+            minimumDeadline(self.ack_deadline, self.reassembler.nextDeadline()),
+            self.result_deadline,
+        );
     }
 
     pub fn start(self: *Machine, now: std.Io.Timestamp) Error!Outcome {
-        const payload = try makeSamHandshake(self.allocator, self.config);
-        defer self.allocator.free(payload);
-
-        const encrypted = try encryptPayload(
-            self.allocator,
-            self.config.des_key,
-            self.config.initial_iv,
-            payload,
+        const handshake = switch (self.config.mode) {
+            .sam => |sam_config| sam_config,
+        };
+        const payload = try self.allocator.alloc(
+            u8,
+            sam.handshakeSize(
+                self.config.username_gbk.len,
+                handshake.session_parameter.len,
+                handshake.endpoint_parameter.len,
+            ),
         );
-        errdefer self.allocator.free(encrypted);
-        return self.beginMessage(encrypted, now);
+        defer self.allocator.free(payload);
+        _ = sam.encodeHandshake(
+            self.config.username_gbk,
+            handshake.session_parameter,
+            handshake.endpoint_parameter,
+            payload,
+        ) catch return error.InvalidConfig;
+        return self.beginPayload(payload, .handshake, now);
     }
 
     pub fn step(self: *Machine, now: std.Io.Timestamp, input: Input) Error!Outcome {
@@ -147,6 +166,7 @@ pub const Machine = struct {
     fn beginMessage(
         self: *Machine,
         encrypted: []u8,
+        kind: MessageKind,
         now: std.Io.Timestamp,
     ) Error!Outcome {
         const fragment = fragmentAt(encrypted.len, 0);
@@ -168,6 +188,7 @@ pub const Machine = struct {
         self.timestamps = prepared.timestamps;
         self.next_message_id +%= 1;
         self.outbound = .{
+            .kind = kind,
             .encrypted = encrypted,
             .total_len = encrypted.len,
             .offset = 0,
@@ -185,6 +206,53 @@ pub const Machine = struct {
             .failure = null,
             .generation = self.generation,
         };
+    }
+
+    fn beginPayload(
+        self: *Machine,
+        payload: []const u8,
+        kind: MessageKind,
+        now: std.Io.Timestamp,
+    ) Error!Outcome {
+        const encrypted = try encryptPayload(
+            self.allocator,
+            self.config.des_key,
+            self.config.initial_iv,
+            payload,
+        );
+        errdefer self.allocator.free(encrypted);
+        return self.beginMessage(encrypted, kind, now);
+    }
+
+    fn beginUserInfo(self: *Machine, now: std.Io.Timestamp) Error!Outcome {
+        const current = self.outbound orelse return error.InvalidState;
+        self.outbound = null;
+
+        const info = sam.UserInfo{
+            .username_gbk = self.config.username_gbk,
+            .ipv4 = self.config.network.ipv4,
+            .mac = self.config.network.mac,
+            .netmask = self.config.network.netmask,
+            .gateway = self.config.network.gateway,
+            .dns = self.config.network.dns,
+        };
+        const payload_len = sam.userInfoSize(info);
+        const payload = self.allocator.alloc(u8, payload_len) catch |err| {
+            self.outbound = current;
+            return err;
+        };
+        defer self.allocator.free(payload);
+        _ = sam.encodeUserInfo(info, payload) catch {
+            self.outbound = current;
+            return error.InvalidConfig;
+        };
+
+        const result = self.beginPayload(payload, .user_info, now) catch |err| {
+            self.outbound = current;
+            return err;
+        };
+        self.allocator.free(current.encrypted);
+        return result;
     }
 
     fn handleFrame(
@@ -219,20 +287,27 @@ pub const Machine = struct {
 
         const next_offset = outbound.offset + outbound.current_len;
         if (next_offset == outbound.total_len) {
-            const actions = try self.allocator.alloc(Action, 0);
-            errdefer self.allocator.free(actions);
             self.timestamps = timestamp_update.state;
-            self.allocator.free(outbound.encrypted);
-            self.outbound = null;
-            self.ack_deadline = null;
-            return .{
-                .actions = actions,
-                .previous_phase = .{ .direct = self.phase },
-                .phase = .{ .direct = self.phase },
-                .next_deadline = null,
-                .failure = null,
-                .generation = self.generation,
-            };
+            switch (outbound.kind) {
+                .handshake => return self.beginUserInfo(now),
+                .user_info => {
+                    const actions = try self.allocator.alloc(Action, 0);
+                    errdefer self.allocator.free(actions);
+                    self.allocator.free(outbound.encrypted);
+                    self.outbound = null;
+                    self.ack_deadline = null;
+                    self.phase = .awaiting_result;
+                    self.result_deadline = try time.addDuration(now, .fromSeconds(9));
+                    return .{
+                        .actions = actions,
+                        .previous_phase = .{ .direct = .initializing },
+                        .phase = .{ .direct = self.phase },
+                        .next_deadline = self.result_deadline,
+                        .failure = null,
+                        .generation = self.generation,
+                    };
+                },
+            }
         }
 
         const fragment = fragmentAt(outbound.total_len, next_offset);
@@ -253,6 +328,7 @@ pub const Machine = struct {
         self.timestamps = prepared.timestamps;
         self.next_message_id +%= 1;
         self.outbound = .{
+            .kind = outbound.kind,
             .encrypted = outbound.encrypted,
             .total_len = outbound.total_len,
             .offset = next_offset,
@@ -370,6 +446,20 @@ pub const Machine = struct {
                             .generation = self.generation,
                         };
                     };
+                    const sam_result = sam.parseDhcpAuthResult(plaintext) catch null;
+                    if (sam_result) |result| {
+                        self.allocator.free(complete);
+                        const outcome = self.completeWithSamResult(
+                            actions,
+                            result,
+                            timestamp_update.state,
+                        ) catch |err| {
+                            self.allocator.free(plaintext);
+                            return err;
+                        };
+                        self.allocator.free(plaintext);
+                        return outcome;
+                    }
                     if (self.received_payload) |previous| self.allocator.free(previous);
                     self.received_payload = plaintext;
                 }
@@ -388,6 +478,58 @@ pub const Machine = struct {
         };
     }
 
+    fn completeWithSamResult(
+        self: *Machine,
+        actions: []Action,
+        result: sam.DhcpAuthResult,
+        timestamps: TimestampState,
+    ) Error!Outcome {
+        const message = if (result.message_gbk.len == 0)
+            null
+        else
+            try self.allocator.dupe(u8, result.message_gbk);
+        errdefer if (message) |value| self.allocator.free(value);
+
+        const combined = self.allocator.alloc(Action, 2) catch |err| {
+            session_outcome.freeActions(self.allocator, actions);
+            return err;
+        };
+        errdefer self.allocator.free(combined);
+        combined[0] = actions[0];
+        combined[1] = .{ .direct_auth_result = .{
+            .success = result.success,
+            .server_message_gbk = message,
+        } };
+        self.allocator.free(actions);
+
+        self.timestamps = timestamps;
+        self.result_deadline = null;
+        if (result.success) {
+            self.phase = .active;
+            return .{
+                .actions = combined,
+                .previous_phase = .{ .direct = .awaiting_result },
+                .phase = .{ .direct = .active },
+                .next_deadline = self.nextDeadline(),
+                .failure = null,
+                .generation = self.generation,
+            };
+        }
+
+        self.phase = .initializing;
+        return .{
+            .actions = combined,
+            .previous_phase = .{ .direct = .awaiting_result },
+            .phase = .idle,
+            .next_deadline = null,
+            .failure = if (result.message_gbk.len == 0)
+                .direct_result_timeout
+            else
+                .direct_result_rejected,
+            .generation = self.generation,
+        };
+    }
+
     fn matchesEndpoints(self: *const Machine, frame: wire.DecodedFrame) bool {
         return frame.header.session_id == self.config.session_id and
             std.mem.eql(u8, &frame.source.mac, &self.config.peer_mac) and
@@ -401,8 +543,17 @@ pub const Machine = struct {
     fn handleTimer(self: *Machine, now: std.Io.Timestamp) Error!Outcome {
         const reassembly_deadline = self.reassembler.nextDeadline();
         const reassembly_expired = self.reassembler.expire(now);
+        const result_deadline = self.result_deadline;
+        const result_expired = if (result_deadline) |deadline|
+            !now.compare(.lt, deadline)
+        else
+            false;
         const deadline = self.ack_deadline orelse {
             if (reassembly_expired) return self.noop();
+            if (result_expired) return self.resultTimeout();
+            if (result_deadline) |result_at| {
+                if (now.compare(.lt, result_at)) return error.TimerNotDue;
+            }
             if (reassembly_deadline) |reassembly_at| {
                 if (now.compare(.lt, reassembly_at)) return error.TimerNotDue;
             }
@@ -457,6 +608,25 @@ pub const Machine = struct {
             .phase = .{ .direct = self.phase },
             .next_deadline = self.nextDeadline(),
             .failure = null,
+            .generation = self.generation,
+        };
+    }
+
+    fn resultTimeout(self: *Machine) Error!Outcome {
+        const actions = try self.allocator.alloc(Action, 1);
+        errdefer self.allocator.free(actions);
+        actions[0] = .{ .direct_auth_result = .{
+            .success = false,
+            .server_message_gbk = null,
+        } };
+        self.result_deadline = null;
+        self.phase = .initializing;
+        return .{
+            .actions = actions,
+            .previous_phase = .{ .direct = .awaiting_result },
+            .phase = .idle,
+            .next_deadline = null,
+            .failure = .direct_result_timeout,
             .generation = self.generation,
         };
     }
@@ -624,38 +794,6 @@ fn minimumDeadline(
     return if (first.?.compare(.lt, second.?)) first.? else second.?;
 }
 
-fn makeSamHandshake(
-    allocator: std.mem.Allocator,
-    config: types.DirectSessionConfig,
-) Error![]u8 {
-    const sam = switch (config.mode) {
-        .sam => |value| value,
-    };
-    const payload_len = 3 + 2 + config.username_gbk.len + 2 + sam.session_parameter.len +
-        2 + sam.endpoint_parameter.len;
-    const payload = try allocator.alloc(u8, payload_len);
-    errdefer allocator.free(payload);
-
-    var index: usize = 0;
-    payload[index..][0..3].* = .{ 0x01, 0x01, 0x02 };
-    index += 3;
-    payload[index] = 0x03;
-    payload[index + 1] = @intCast(config.username_gbk.len);
-    index += 2;
-    @memcpy(payload[index..][0..config.username_gbk.len], config.username_gbk);
-    index += config.username_gbk.len;
-    payload[index] = 0x04;
-    payload[index + 1] = sam.session_parameter.len;
-    index += 2;
-    @memcpy(payload[index..][0..sam.session_parameter.len], &sam.session_parameter);
-    index += sam.session_parameter.len;
-    payload[index] = 0x05;
-    payload[index + 1] = sam.endpoint_parameter.len;
-    index += 2;
-    @memcpy(payload[index..][0..sam.endpoint_parameter.len], &sam.endpoint_parameter);
-    return payload;
-}
-
 fn encryptPayload(
     allocator: std.mem.Allocator,
     key: [8]u8,
@@ -681,7 +819,7 @@ test "Direct fragments a message in strict flag order" {
 
     const encrypted = try std.testing.allocator.alloc(u8, 3008);
     @memset(encrypted, 0x5a);
-    var outcome = try machine.beginMessage(encrypted, testTimestamp(0));
+    var outcome = try machine.beginMessage(encrypted, .user_info, testTimestamp(0));
 
     const expected_flags = [_]u8{ 2, 3, 4 };
     for (expected_flags, 0..) |expected_flag, index| {
@@ -702,7 +840,14 @@ test "Direct fragments a message in strict flag order" {
         );
     }
     outcome.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), machine.nextDeadline());
+    try std.testing.expectEqual(
+        testTimestamp(12 * std.time.ns_per_s),
+        machine.nextDeadline().?,
+    );
+    try std.testing.expectEqual(
+        types.ActivePhase{ .direct = .awaiting_result },
+        machine.currentPhase(),
+    );
 }
 
 test "Direct retransmits the same fragment until attempts are exhausted" {
@@ -712,7 +857,7 @@ test "Direct retransmits the same fragment until attempts are exhausted" {
 
     const encrypted = try std.testing.allocator.alloc(u8, 100);
     @memset(encrypted, 0x33);
-    var initial = try machine.beginMessage(encrypted, testTimestamp(0));
+    var initial = try machine.beginMessage(encrypted, .user_info, testTimestamp(0));
     const initial_frame = try wire.decodeFrame(initial.actions[0].send_frame);
 
     try std.testing.expectError(error.TimerNotDue, machine.step(
@@ -899,6 +1044,52 @@ test "Direct timestamp modes reject timestamps outside their windows" {
     try std.testing.expect(!rejected_monotonic.accepted);
 }
 
+test "Direct maps a rejected SAM result to a terminal event" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+    try enterAwaitingResult(&machine, config);
+
+    var payload: [16]u8 = @splat(0);
+    payload[0..15].* = .{
+        1,    1,   12,
+        0x09, 10,  0x02,
+        5,    'b', 'a',
+        'd',  '!', '!',
+        0x13, 1,   0,
+    };
+    var encrypted: [16]u8 = undefined;
+    _ = try des.encryptCbc(config.des_key, config.initial_iv, &payload, &encrypted);
+    var result = try sendDataForTest(&machine, config, 50, 1, encrypted.len, 100, &encrypted);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(types.ActivePhase.idle, result.phase);
+    try std.testing.expectEqual(types.FailureReason.direct_result_rejected, result.failure.?);
+    try std.testing.expectEqual(@as(usize, 2), result.actions.len);
+    const auth = result.actions[1].direct_auth_result;
+    try std.testing.expect(!auth.success);
+    try std.testing.expectEqualStrings("bad!!", auth.server_message_gbk.?);
+}
+
+test "Direct terminates when the SAM result deadline expires" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+    try enterAwaitingResult(&machine, config);
+
+    var timeout = try machine.step(
+        testTimestamp(9 * std.time.ns_per_s),
+        .{ .timer = machine.currentGeneration() },
+    );
+    defer timeout.deinit(std.testing.allocator);
+    try std.testing.expectEqual(types.ActivePhase.idle, timeout.phase);
+    try std.testing.expectEqual(types.FailureReason.direct_result_timeout, timeout.failure.?);
+    try std.testing.expectEqual(@as(usize, 1), timeout.actions.len);
+    const auth = timeout.actions[0].direct_auth_result;
+    try std.testing.expect(!auth.success);
+    try std.testing.expectEqual(@as(?[]u8, null), auth.server_message_gbk);
+}
+
 fn testConfig() types.DirectSessionConfig {
     return .{
         .mode = .{ .sam = .{
@@ -1001,6 +1192,31 @@ fn sendDataForTest(
         .generation = machine.currentGeneration(),
         .bytes = frame,
     } });
+}
+
+fn enterAwaitingResult(
+    machine: *Machine,
+    config: types.DirectSessionConfig,
+) !void {
+    const encrypted = try std.testing.allocator.alloc(u8, 16);
+    var initial = try machine.beginMessage(encrypted, .user_info, testTimestamp(0));
+    const frame = try wire.decodeFrame(initial.actions[0].send_frame);
+    var ack_buffer: [256]u8 = undefined;
+    const ack = try encodeAckForFrame(&ack_buffer, frame, config);
+    initial.deinit(std.testing.allocator);
+
+    var awaiting = try machine.step(
+        testTimestamp(0),
+        .{ .frame = .{
+            .generation = machine.currentGeneration(),
+            .bytes = ack,
+        } },
+    );
+    awaiting.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        types.ActivePhase{ .direct = .awaiting_result },
+        machine.currentPhase(),
+    );
 }
 
 fn testTimestamp(nanoseconds: i96) std.Io.Timestamp {

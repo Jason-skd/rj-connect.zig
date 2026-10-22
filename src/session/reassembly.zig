@@ -66,7 +66,7 @@ pub const Reassembler = struct {
         }
 
         return switch (flags) {
-            1 => self.acceptSingle(id, total, chunk, now),
+            1 => self.acceptSingle(id, total, chunk),
             2 => self.acceptFirst(id, total, chunk, now),
             3 => self.acceptMiddle(id, total, chunk),
             4 => self.acceptLast(id, total, chunk),
@@ -79,7 +79,6 @@ pub const Reassembler = struct {
         id: u32,
         total_len: usize,
         chunk: []const u8,
-        now: std.Io.Timestamp,
     ) types.Error!AcceptResult {
         if (chunk.len != total_len) return .ignored;
         const buffer = try self.allocator.alloc(u8, total_len);
@@ -90,7 +89,7 @@ pub const Reassembler = struct {
         self.last_id = id;
         self.total_len = total_len;
         self.filled = total_len;
-        self.expires_at = now;
+        self.expires_at = null;
         return .{ .complete = buffer };
     }
 
