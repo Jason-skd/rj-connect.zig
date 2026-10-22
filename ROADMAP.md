@@ -181,11 +181,39 @@ pub fn step(
 
 ### 已拍板决策
 
+- M4 保留完整范围：直接通信传输核心与 SAM/SMP 生命周期在同一个 spec 中建模，并通过垂直票据分批实施。
 - 重组器不拥有网络连接，所有输入帧由调用方提交。
 - 分片和重组在密文上执行，完成重组后才解密。
 - 时间验证、长度验证和 authenticator 校验均在把载荷交给 SAM/SMP 解析器之前完成。
 - 会话 key、IV、timestamp 和分片缓冲由 `Session` 持有；对端网络生命周期由调用方负责。
 - 真实网络互操作由调用方的适配器测试完成，不属于本库进程。
+- `Session` 是协调者，只持有至多一个活动协议机；机器拥有自己的阶段、计数、deadline 和动态资源，并共享 allocator、source MAC、时间水位和代次 context。
+- 协议机通过只含 `step`、`nextDeadline` 和 `deinit` 的内部 vtable 接入；机器切换采用构造并验证完成后原子替换，失败保留旧机器。
+- 阶段对称命名为 `EapMd5Phase` 与 `DirectPhase`，公开为 `ActivePhase` tagged union；没有活动机器时进入 `.idle`。
+- `DirectPhase` 为 `initializing`、`awaiting_result`、`active`；内部 ACK、重发和解析状态不公开。
+- 新机器激活时递增代次；同一机器内部重发不递增；旁路协议帧返回状态不变的 no-op `Outcome`。
+- `Session` 显式拥有动态资源并提供 `deinit`；状态转换采用准备完成后再提交，不复制整个 `Session`。
+- 直接会话由已认证 EAP 状态上的显式 `direct_session` 事件启动，不能隐式从私有字段自动启动。
+- `DirectSessionConfig` 一次提交并复制生命周期所需内容，包含模式、端点、session ID、key/IV、时间戳模式、用户名、网络信息、SAM/SMP 参数、周期和最高版本；输入切片不跨调用保存。
+- `DirectSessionConfig` 使用公共字段 struct 加 `mode` union；SAM 与 SMP 的独有字段分别由命名 struct 完整包装，再对两个包装做 tagged union，不把每个字段建模成独立 optional。
+- 网络入口和发送动作统一使用完整 Ethernet II 帧，由 EtherType 分流；IPv4 固定 IHL 5、protocol 17、无 IP 分片，并严格校验长度与 checksum。
+- 每片通过端点、session、时间戳、authenticator 和序列校验后立即 ACK；ACK 回显 ID/session/端点，`packet_len=42`、`total_len=0`。
+- 分片采用严格有序单缓冲重组；同 ID 只重发 ACK、不重复追加，跳号和过旧 ID 丢弃且不 ACK。
+- 首片验证 `total_len <= max_message_size`、DES 块和分片规则后，一次分配恰好 `total_len` 字节；默认上限 `1 MiB`，追加前完成边界检查，末片精确补齐。
+- 分片发送默认采用 `3s` ACK 等待和最多 `3` 次发送尝试；重发保持 message ID/flags/payload/session ID/长度/端点，更新时间戳并重算 authenticator。
+- 未完成重组从首条可接受片段起 `9s` 过期；完成、新首片、会话关闭和 `deinit` 都释放缓冲。
+- SMP 初始化默认在 `0s/30s/60s` 发起三次请求，单次请求等待 `10s`，约 `90s` 后终止认证；三个参数可由 `Config` 覆盖。
+- 时间戳模式为服务器时间或旧客户端单调兼容模式；服务器时间窗口绝对值小于 `61s`，非前进时间戳最多连续接受 5 个包。
+- 服务器时间模式按本地经过秒推进发送时间；单调模式每发送一个帧（包括重发）推进一次。
+- 片段通过校验并 ACK 后提交重放进度和追加内容；完整消息解密失败时释放重组缓冲，但保留 key、IV 和片段级重放进度。
+- 用户信息发送成功后等待 DHCP 认证结果 `9s`；SAM 与 SMP 结果输出为拥有所有权的 `direct_auth_result` 事件，服务器文本为 GBK 字节。
+- 直接结果拒绝、用户信息发送失败和结果超时都终止当前认证尝试；自动重试由调用方外层策略负责。
+- 取消和 Logoff 先幂等清理直接资源，再以一次可观察的终止结果回到 `.idle`；远端 Logoff 不重复发送。
+- 重认证只产生 `reauth_required` 并回到 `.idle`，不自动选择 EAP-MD5；下一次认证由调用方或 M5 显式启动。
+- 公开 API 显式使用 `username_gbk` 和 `server_message_gbk` 等 GBK 字节；字符集转换由调用方负责。
+- 服务器下发的心跳、重认证、SMP hello、检测间隔和请求参数在 bootstrap 中标准化；零间隔禁用对应周期。
+- SAM 心跳发送无响应要求的握手消息；SMP 按 hello 间隔发送 `0x23`，等待业务响应，连续 3 次失败产生重认证请求；`0x80` flag 只保留观察值。
+- `protocol/sam.zig` 与 `protocol/smp.zig` 负责无生命周期业务 codec；`protocol/direct.zig` 只负责帧、header、authenticator 和分片线格式；不提供任意 direct payload 发送入口。
 
 ### 验收
 
