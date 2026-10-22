@@ -178,6 +178,7 @@ pub const Engine = struct {
                 try next.enterConnecting(now, 1);
                 try builder.addFrame(try next.makeStartFrame());
             },
+            .direct_session => return error.InvalidState,
             .frame => |event| {
                 if (!event.generation.eql(next.generation)) return error.StaleGeneration;
                 const frame = eapol.decode(event.bytes) catch return error.InvalidFrame;

@@ -1,5 +1,6 @@
 const std = @import("std");
 const eapol = @import("../protocol/eapol.zig");
+const direct = @import("../protocol/direct.zig");
 const session_api = @import("session.zig");
 
 const Action = session_api.Action;
@@ -662,4 +663,149 @@ test "Session acknowledges Notification and responds to Credential requests" {
         &.{ 5, 'a', 'l', 'i', 'c', 'e', 's', 'e', 'c', 'r', 'e', 't' },
         decoded.eap.?.data,
     );
+}
+
+test "Session starts SAM direct communication and accepts its ACK" {
+    const des_key = [8]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
+    const initial_iv = [8]u8{ 8, 9, 10, 11, 12, 13, 14, 15 };
+    var value = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+    });
+    defer value.deinit();
+    try prepareChallengeSession(&value);
+
+    const success = terminalRequest(.success, 0x17);
+    var authenticated = try value.step(timestamp(5 * std.time.ns_per_s), frameInput(&value, &success));
+    authenticated.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Phase.authenticated, value.phase());
+
+    var started = try value.step(timestamp(6 * std.time.ns_per_s), .{
+        .direct_session = .{
+            .mode = .{ .sam = .{
+                .session_parameter = .{ 1, 2, 3, 4 },
+                .endpoint_parameter = .{ 5, 6, 7, 8, 9, 10 },
+            } },
+            .peer_mac = .{ 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb },
+            .peer_ipv4 = .{ 192, 0, 2, 1 },
+            .peer_udp_port = 5678,
+            .local_udp_port = 1234,
+            .session_id = 0x1122_3344,
+            .des_key = des_key,
+            .initial_iv = initial_iv,
+            .timestamp = .{ .monotonic = 100 },
+            .username_gbk = "alice",
+            .network = .{
+                .ipv4 = .{ 192, 0, 2, 10 },
+                .netmask = .{ 255, 255, 255, 0 },
+                .gateway = .{ 192, 0, 2, 1 },
+                .dns = .{ 203, 0, 113, 53 },
+                .mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+            },
+        },
+    });
+    defer started.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(Phase.authenticated, started.previous_phase);
+    try std.testing.expectEqual(
+        ActivePhase{ .direct = .initializing },
+        started.phase,
+    );
+    try std.testing.expectEqual(timestamp(9 * std.time.ns_per_s), started.next_deadline.?);
+    try std.testing.expectEqual(@as(usize, 1), started.actions.len);
+
+    const frame = try direct.decodeFrame(started.actions[0].send_frame);
+    try std.testing.expectEqual(@as(u8, 1), frame.header.code);
+    try std.testing.expectEqual(@as(u8, 1), frame.header.flags);
+    try std.testing.expectEqual(@as(u32, 0x1122_3344), frame.header.session_id);
+    try std.testing.expectEqual(@as(u16, 1234), frame.source.port);
+    try std.testing.expectEqual(@as(u16, 5678), frame.destination.port);
+
+    var plaintext: [256]u8 = undefined;
+    const plaintext_len = try @import("../protocol/des.zig").decryptCbc(
+        des_key,
+        initial_iv,
+        frame.encrypted,
+        &plaintext,
+    );
+    try std.testing.expectEqualSlices(u8, &.{
+        0x01, 0x01, 0x02,
+        0x03, 0x05, 'a',
+        'l',  'i',  'c',
+        'e',  0x04, 0x04,
+        1,    2,    3,
+        4,    0x05, 0x06,
+        5,    6,    7,
+        8,    9,    10,
+    }, plaintext[0..24]);
+    try std.testing.expect(plaintext_len >= 24);
+
+    var bypass: [14]u8 = @splat(0);
+    std.mem.writeInt(u16, bypass[12..14], 0x0806, .big);
+    var bypassed = try value.step(timestamp(7 * std.time.ns_per_s), frameInput(&value, &bypass));
+    bypassed.deinit(std.testing.allocator);
+    try std.testing.expectEqual(timestamp(9 * std.time.ns_per_s), value.nextDeadline().?);
+
+    var rejected_ack_buffer: [256]u8 = undefined;
+    const rejected_ack = try encodeAck(
+        &rejected_ack_buffer,
+        frame.header.id + 1,
+        frame.header.session_id,
+        frame.header.timestamp,
+        frame.destination,
+        frame.source,
+        des_key,
+        initial_iv,
+    );
+    var rejected = try value.step(
+        timestamp(7 * std.time.ns_per_s),
+        frameInput(&value, rejected_ack),
+    );
+    rejected.deinit(std.testing.allocator);
+    try std.testing.expectEqual(timestamp(9 * std.time.ns_per_s), value.nextDeadline().?);
+
+    var ack_buffer: [256]u8 = undefined;
+    const ack = try encodeAck(
+        &ack_buffer,
+        frame.header.id,
+        frame.header.session_id,
+        frame.header.timestamp,
+        frame.destination,
+        frame.source,
+        des_key,
+        initial_iv,
+    );
+    var acknowledged = try value.step(
+        timestamp(7 * std.time.ns_per_s),
+        frameInput(&value, ack),
+    );
+    defer acknowledged.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase{ .direct = .initializing }, acknowledged.phase);
+    try std.testing.expectEqual(@as(usize, 0), acknowledged.actions.len);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), value.nextDeadline());
+}
+
+fn encodeAck(
+    output: []u8,
+    id: u32,
+    session_id: u32,
+    direct_timestamp: u64,
+    sender: direct.Endpoint,
+    receiver: direct.Endpoint,
+    key: [8]u8,
+    iv: [8]u8,
+) ![]const u8 {
+    const encoded = try direct.encodeFrame(.{
+        .version = 1,
+        .code = 2,
+        .id = id,
+        .packet_len = direct.header_size,
+        .authenticator = @splat(0),
+        .session_id = session_id,
+        .timestamp = direct_timestamp,
+        .message_type = 1,
+        .flags = 0,
+        .total_len = 0,
+    }, &.{}, sender, receiver, output);
+    try direct.setAuthenticator(encoded, key, iv);
+    return encoded;
 }
