@@ -111,7 +111,33 @@ Windows 6.85 的 `Support`/`SupportNum` 已静态定位为配置保存器生成�
 | Credential，type `7`         | 返回用户名和口令字节                      |
 | PEAP，type `25`              | 建立 PEAP/TLS 隧道并按内层方法认证        |
 
-> TODO（后续版本可选补齐调查）：EAP-TLS、EAP-TTLS、EAP-GTC、LEAP 和 OTP 等内嵌认证方法。
+### 制品能力与主认证器选择
+
+Linux 1.31 的 `eap_register_methods()`（`0x4a3bb0`）注册以下内嵌方法（表按 EAP type 排列）：
+
+| EAP type | 方法         | 当前制品的实际入口                                         |
+| -------- | ------------ | ---------------------------------------------------------- |
+| `4`      | EAP-MD5      | 私有有线状态机直接分派 MD5-Challenge                       |
+| `5`      | EAP-OTP      | 仅内嵌 wpa_supplicant 实现；有线私有状态机收到后返回 NAK    |
+| `6`      | EAP-GTC      | 仅内嵌 wpa_supplicant 实现；有线私有状态机收到后返回 NAK    |
+| `13`     | EAP-TLS      | 内嵌实现；Windows 的 `AuthMode=EAPTLS` 映射到该 type        |
+| `17`     | EAP-LEAP     | 仅内嵌实现；当前网络配置没有选择入口                        |
+| `21`     | EAP-TTLS     | 仅内嵌实现；当前网络配置没有选择入口                        |
+| `25`     | EAP-PEAP     | 内嵌实现；Windows EAPHost/EAPWIRELESS profile 选择该 type   |
+| `26`     | EAP-MSCHAPv2 | PEAP/TTLS 可用的内层方法                                   |
+
+因此“二进制中存在某种方法”不能扩大为目标客户端会使用该方法的结论。Linux 1.31 的有线私有
+`CStateMachineThread::parseFrame()` 只直接处理 Identity、Notification、Legacy NAK、MD5-Challenge、
+Credential，并对 OTP/GTC 发送 NAK；它没有 TLS、TTLS、LEAP 或 PEAP 的私有分支。Linux 随包的无线配置
+又明确固定为 `eap=PEAP` 与 `phase2="auth=MSCHAPV2"`，没有 TTLS、GTC、OTP 或 LEAP 选择项。
+
+EAP-TLS 是唯一一个同时具备内嵌实现和具名选择配置的额外外层方法：Windows 的 `AuthMode=EAPTLS`
+选择 type `13`，能力位图另有 `support_tls_wired`/`support_tls_wireless`。它的 TLS 记录、证书和
+身份验证仍由平台 provider 完成，不在本页另写一套 EAP-TLS 私有容器。目标学校是否选用该 profile
+属于部署事实，不改变上述客户端分派规则。
+
+> 当前 Zig 代码暂不实施：EAP-TLS、EAP-TTLS、EAP-GTC、EAP-LEAP、EAP-OTP 和独立
+> EAP-MSCHAPv2 外层认证。client 必须把未支持的服务器方法转换为明确的 NAK 或不支持错误。
 
 服务器 `Success` code `3` 表示 EAP 方法成功，`Failure` code `4` 表示方法失败。它们不是 EAP Request。
 

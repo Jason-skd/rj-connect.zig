@@ -159,7 +159,96 @@ client 获取方式：由系统的 DHCP 客户端或网络管理 API 提供当�
 
 TLS 隧道内按服务器协商结果执行内层认证。锐捷扩展常见路径使用 MSCHAPv2，用户名和密码由 client 提供。PEAP 的私有字段使用紧凑容器，口令字段 `0x5f` 使用固定起始值，V3 摘要字段 `0x60` 使用与 EAP-MD5 相同的五模式构造。
 
-> TODO（后续版本可选补齐调查）：PEAPv1、PEAPv2 和 cryptobinding。
+### PEAP 版本协商
+
+PEAP 请求的第一个 TLS 应用数据字节包含 `flags`。低 3 位是服务器支持的 PEAP 版本：
+
+```text
+server_version = flags & 0x07
+if server_version < own_version:
+    own_version = server_version
+if forced_version >= 0 and forced_version != own_version:
+    fail
+```
+
+Linux 1.31 的 `eap_peap_data` 默认 `peap_version = 1`、`force_peap_version = -1`。配置字符串
+`peapver=N` 同时设置当前版本和强制版本；强制值不能与服务器协商结果不同。客户端生成的 Linux 无线
+profile 没有 `peapver`，所以当前随包路径的客户端上限是 PEAPv1，服务器可以把双方降为 PEAPv0，
+不能协商到 PEAPv2。嵌入式实现本身支持强制 PEAPv2。
+
+PEAPv0/v1 的 TLS 内层载荷直接以 EAP 帧开始。PEAPv2 必须把内层 EAP 帧封装为 EAP-Payload TLV：
+
+```text
+tlv_type = 0x8009
+length   = u16be(inner EAP length)
+value    = complete inner EAP packet
+```
+
+客户端检查 TLV 长度、内层 EAP header 长度和完整数据长度三者一致；不足、溢出或长度不一致均终止
+本次内层认证。
+
+PEAPv1 的隧道内 EAP-Success 可以用三种兼容策略结束：
+
+| `peap_outer_success` | 行为 |
+| -------------------- | ---- |
+| `0`                  | 收到隧道内 EAP-Success 后立即结束认证 |
+| `1`                  | 再发送一个隧道内 EAP-Success |
+| `2`                  | 发送 PEAP/TLS ACK 完成认证 |
+
+Linux 1.31 默认值是 `2`。这里的 Success 处理只属于 PEAP 隧道，不是用外层 EAP Success 跳过内层认证。
+
+### Cryptobinding
+
+Linux 1.31 支持 `crypto_binding=0/1/2`，分别为禁用、可选和必需；默认是可选。Cryptobinding
+TLV 在 TLS 明文中使用 type `0x000c`，PEAPv2 使用带 mandatory 位的 `0x800c`；长度固定为
+`0x0038`，即 56 字节 value，完整 TLV 为 60 字节。
+
+该客户端生成的 TLV value 为：
+
+| 偏移   | 长度 | 值 |
+| ------ | ---- | -- |
+| `0x00` | 1    | `0x00` |
+| `0x01` | 1    | 当前 PEAP version |
+| `0x02` | 1    | 当前 PEAP version |
+| `0x03` | 1    | `0x01`，response subtype |
+| `0x04` | 32   | `binding_nonce` |
+| `0x24` | 20   | `compound_mac`，计算前为 20 个零字节 |
+
+接收服务器 request TLV 时，客户端要求 value 的偏移 `0x01` 等于协商 PEAP version，偏移 `0x03`
+为 `0x00`（request subtype）；TLV 总长、version 或 subtype 不符都会终止认证。若
+`crypto_binding=2` 而内层成功消息没有 Cryptobinding TLV，也必须失败。
+
+`compound_mac` 的输入和密钥为：
+
+```text
+mac_input = complete_cryptobinding_TLV[60] || eap_type:u8
+compound_mac = HMAC-SHA1(cmk[20], mac_input)
+eap_type = 25
+```
+
+计算时 TLV 中的 MAC 区保持为零，随后把得到的 20 字节 HMAC 写入该区。密钥派生为：
+
+```text
+isk = phase2_getKey() 的 32 字节结果；
+      否则取 TLS key block 以 "client PEAP encryption"
+      导出的 64 字节结果中的前 32 字节
+imck[60] = PRF+(peap_version, tk[40], "Inner Methods Compound Keys", isk[32])
+ipmk[40] = imck[0..40]
+cmk[20]  = imck[40..60]
+```
+
+接收端使用常量长度检查和完整 HMAC-SHA1 比较；任何 MAC 或 TLV 错误都不得继续内层认证。
+
+### 平台实现边界
+
+Linux 1.31 内嵌完整 PEAPv0/v1/v2、EAP-Payload TLV 和 Cryptobinding。Windows 6.85 的
+`SuEapPeerPeap32/64.dll` 只是 EAPHost 代理壳，实际 `SuEapPeap.dll` 未包含在现有安装材料中；
+macOS 1.35 将 PEAP/MSCHAPv2 委托给系统 network/security provider。三个平台的 TLS 记录、证书
+验证和用户凭据仍由 client 提供，不能从 Linux 的 in-process 实现外推目标平台 provider。
+
+> 当前 Zig 代码暂不实施：TLS 记录处理、PEAP internal EAP 状态机、Cryptobinding 密钥派生和
+> HMAC 校验。若 server 要求 Cryptobinding，而 client 没有提供相应 TLS 导出密钥和内层成功状态，
+> 必须显式失败，不能忽略该 TLV。
 
 外层 PEAP Success 后，客户端获取 IPv4 地址并启动直接通信。服务器可以在隧道内下发 SAM/SMP 端口、地址、最大版本和其他会话参数；这些参数必须在内层认证完成前保存到独立候选状态。
 
