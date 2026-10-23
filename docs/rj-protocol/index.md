@@ -13,15 +13,28 @@ plan: "#文档计划"
 
 ## 规范范围
 
-本规范以锐捷 1.30、1.31 与 1.33 客户端为主要研究基线，并参考 macOS 1.35 与 Windows 6.85 样本进行浅层结构复核，主要面向 IEEE 802.1X 有线接入。文本同时定义标准 EAPOL/EAP 外层、标准与锐捷私有 EAP-MD5 分支、PEAP/MSCHAPv2 路径的接入边界、锐捷厂商属性、DHCP 第二认证，以及认证后的 SAM/SMP 直接通信。
-
-> TODO（后续版本可选补齐调查）：无线 802.11 与 Windows EAPHost 路径。
+本规范以锐捷 1.30、1.31 与 1.33 客户端为主要研究基线，并参考 macOS 1.35 与 Windows 6.85 样本进行结构复核。文本同时定义标准 EAPOL/EAP 外层、标准与锐捷私有 EAP-MD5 分支、PEAP/MSCHAPv2 路径的接入边界、锐捷厂商属性、DHCP 第二认证，以及认证后的 SAM/SMP 直接通信。802.1X 的介质接入和系统 EAP provider 保持平台适配边界，本文不把 802.11 管理帧或 EAPHost 内部接口误写成锐捷私有协议。
 
 跨版本共同结论只适用于已经由样本、符号或固定向量支持的线格式和算法层。V3 输入材料、部署可选字段、TLS 身份策略、硬件信息和 Direct 本地回退值必须与具体客户端构建及校园网配置绑定。
 
 图形界面、托盘、安装器、升级页面、密码修改界面和校园网业务页面不属于核心认证协议。这些能力可以复用同一字段系统，但不影响最小认证器的报文定义。
 
 本规范描述协议语义，不声明某个校园网必然启用全部可选字段。部署者可要求更严格的字段集合，也可忽略不影响认证主链的展示字段。
+
+## 接入介质与平台边界
+
+三个客户端都把无线接入交给操作系统或内嵌 supplicant，锐捷私有字段仍位于 EAP 和 Direct 层：
+
+| 平台 | 无线接入实现 | EAP 路径 |
+| ---- | ------------ | -------- |
+| Linux 1.31 | 内嵌 `wpa_supplicant` 0.7.3，`supf_*` 状态回调管理扫描、关联和 4-way handshake | 生成配置固定为 `key_mgmt=WPA-EAP`、`eap=PEAP`、`phase2="auth=MSCHAPV2"`；EAPOL 由 wpa_supplicant 收发 |
+| macOS 1.35 | CoreWLAN `CWWiFiClient`/`CWInterface`；`associateToEnterpriseNetwork:identity:username:password:error:` 关联企业网 | 系统 network/security provider 完成 EAP；应用另用 pcap 监听 `ether proto 0x888e` 以取得 Success 和私有字段 |
+| Windows 6.85 | `8021x.exe` 动态加载 `WirelessCore.dll`，后者调用 WlanAPI 管理 profile、连接和 ACM 通知 | `base.rg` 的 OneX profile 选择 EAPHost Type `25`；凭据 XML 经 `WlanSetProfileEapXmlUserData` 写入 |
+
+Windows 与 macOS 的系统无线层可以使用自己的 EAPHost/EAP peer 实例如 EAP-TLS；Linux 内嵌库也编译了
+多个 EAP 方法。这些能力与“当前锐捷认证主链一定选择该方法”不是同一事实。rj-connect 的稳定输入仍是
+完整 EAPOL/EAP 帧以及显式 TLS、凭据和 DHCP 结果；802.11 扫描/关联、CoreWLAN、WLAN API、
+EAPHost 插件 ABI 和系统 keychain 属于 client adapter。
 
 ## 文档计划
 

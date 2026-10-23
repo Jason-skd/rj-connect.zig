@@ -44,7 +44,28 @@ IPv4 total length 等于 `28 + 42 + len(encrypted_chunk)`。UDP length 等于 `8
 | `0x25` | 1    | flags          | 分片位置                     |
 | `0x26` | 4    | total length   | 完整加密载荷长度             |
 
-> TODO（后续版本可选补齐调查）：Direct version 2 的线格式、能力协商和状态差异。
+### Direct version 与 `0x79` 能力值
+
+本页的 42 字节头是三个调查制品使用的 Direct 帧布局。头的第一个字节是协议版本：Linux 1.31 的
+SAM/SMP 初始化直接把默认值 `1` 写入对应参数；macOS 1.35 的
+`nsDirectCom_ProtocalParam` 初始化也把头版本设为 `1`。当前没有发现尺寸、字段偏移、分片或状态机
+随版本变化的第二条构造路径。
+
+Linux 1.31、macOS 1.35 和 Windows 6.85 的客户端私有字段都把 `0x79` 编码为 `2`，表示客户端声称支持
+到 Direct version 2。服务器下发的同名字段也会被读取：
+
+- Linux 1.31 默认保存 `1` 到 `CtrlThread + 0x4bc`；启动 Direct 时取服务器值与 `2` 的较小者，
+  并将结果写入 Direct 参数，后续发送头从该参数取得 version；
+- macOS 1.35 将服务器值保存在
+  `SuRadiusPrivate.m_directCommunicationHighestVersionSupported`；`StartDirectTrans:WaitFor:`
+  同样通过上限为 `2` 的限制函数写入 SAM/SMP Direct 参数；
+- Windows 6.85 将服务器值保存到 `0x7557b4 + 0x345a`，已确认随后用于日志；Direct 启动参数是否把
+  该值传给发送头，现有静态证据不足。
+
+因此 `0x79` 是双方能力广告，Linux/macOS 存在“默认 1、服务器要求时把 version 字节改为 2”的静态
+路径，但调查制品中没有证明 version 2 需要另一套线格式。只有目标服务器实际接受 version 2，并证明
+其收发规则与 version 1 相同的部署，才能使用 version 2；否则实现应继续发送 `1`，遇到只接受未知
+version 2 规则的服务器必须明确报告不支持。
 
 `packet length` 必须等于当前 UDP 载荷减去 8 字节 UDP 头。`total length` 覆盖全部片段重组后的完整 DES-CBC 密文。
 
@@ -292,7 +313,75 @@ SMP user info 的核心地址字段为：
 
 DHCP result 的 `0xce` 长度固定为 1。`0xcf` 为 GBK 文本，可以为空。
 
-> TODO（后续版本可选补齐调查）：SAM/SMP 的 ACL、密码修改、主机信息和服务切换等辅助业务消息。
+### SMP 命令分派
+
+Linux 1.31 `CDirectTranSrv::AnalyzePrivate_SMP` 先验证固定头 `01 00 01`，再读取第 4 字节命令并分派：
+
+| Command | 处理 | 当前构建的行为 |
+| ------- | ---- | -------------- |
+| `0x01`  | `ParseSMPData` | TLS 内层 TLV `0x0b` 承载服务器初始化 XML |
+| `0x02`  | `ParseMsgAndPro` | 解析内层通知文本与 URL TLV，并投递 UI 消息 |
+| `0x03`  | `ParseLogoff` | 内层 TLV `0x1f` 为原因文本，触发本地 logoff |
+| `0x04`  | `ParseReAuth` | Linux 1.31 为空实现；macOS 1.35 转入重认证入口 |
+| `0x05`  | `ParseGetHIStatusNow` | Linux/macOS 仅为释放缓冲的空实现 |
+| `0x06`  | `ParseGetHostInfoNow` | Linux/macOS 仅为释放缓冲的空实现 |
+| `0x07`  | `ParseLogoffOhers` | 内层 TLV `0x47` 为原因文本，并模拟用户下线 |
+| `0x08`-`0x0a` | 无动作 | 当前构建接受但不解释 |
+| `0x2a`  | `ParseModifyPWResult` | 修改口令结果 |
+| `0x2e`  | `ParseDHCPAuthResult_ForSMP` | DHCP 第二认证结果 |
+
+`ParseACLParam` 在 Linux 1.31 和 macOS 1.35 中是返回零而未读取缓冲的空实现，`AnalyzePrivate_SMP`
+也没有 ACL 命令分支；Windows 的 `recv acl param` 只把消息转交给 UI/外部适配层。现有证据因此不支持
+为 SMP 编造 ACL 的 TLV 格式。`HIPacketUpdate` 在 Linux 仅记录日志，`GetHIRusultByLocal` 固定返回否；
+SMP 主机信息命令同样没有可交付载荷。主机检查由 client/平台检查器执行，协议层只接受最终布尔结果
+（见字段 `0x62`）。
+
+### SMP 密码修改
+
+Linux 1.31 的客户端改密请求使用固定头 `01 00 01 2b`，其后为
+`code:u8 || length:u16be || value`：
+
+| Code   | 值 |
+| ------ | -- |
+| `0x02` | 用户名 GBK 字节 |
+| `0x03` | 硬盘序列号 |
+| `0xc1` | 旧口令原始字节 |
+| `0xc0` | 新口令原始字节 |
+
+口令 TLV 不附加 NUL。客户端使用 300 字节总缓冲；所有 TLV 和固定头装入后不得超过该上限。服务器结果
+命令为 `0x2a`，载荷仍使用同一 TLV 编码：
+
+| Code   | 值 |
+| ------ | -- |
+| `0xc1` | 长度必须为 `1`；值为 `0` 表示成功，非零表示失败 |
+| `0xc2` | GBK 结果文本，可为空 |
+
+成功时客户端把待提交的新口令切换为当前口令并结束等待；失败时显示服务端文本。是否开放改密由 SMP
+初始化 XML 的 `psw_security_detect` 配置控制，其中包括 `self_service`、`is_modify`、
+`modify_at_once`、`force_offline`、`offline_wait_time`、`fail_code` 和 `modify_message`。这些字段只控制
+本地 UI、超时和强制下线，不是 EAP 认证凭据的一部分。
+
+### SAM 服务切换
+
+服务列表来自服务器字段 `0x66`，以 `@` 分隔。客户端选择其中一个名称后：
+
+- Ruijie NAS 路径不发送服务切换业务帧，只把新服务名保存为当前选择，并投递内部认证重启消息；
+- 其他 SAM 路径发送以 `01 01 06` 开始的 SAM 载荷，随后使用单字节 TLV：
+
+| Code   | 值 |
+| ------ | -- |
+| `0x03` | 用户名 GBK 字节 |
+| `0x04` | 本机 IPv4 地址 |
+| `0x10` | 一字节 DHCP 标志 |
+| `0x05` | 认证网卡 MAC |
+| `0x09` | 目标服务名 GBK 字节 |
+
+载荷总长上限为 300 字节。服务器在 SAM 外层 TLV `0x07`、subtype `0x0a` 返回结果文本；客户端展示
+文本，并在文本精确等于“切换成功!”时把新服务名写入配置、清除待切换状态。SMP 分派中没有对应的
+服务切换请求或结果命令，不能把 SAM `0x07/0x0a` 套用到 SMP。
+
+> 当前 Zig 代码暂不实施：SMP 改密、服务切换、ACL、主机信息和辅助通知消息。服务切换及改密所需的
+> 用户选择、旧/新口令和主机标识属于第 2 类 client 输入；ACL 与主机信息没有已证明的通用线格式。
 
 SMP hello 连续失败 3 次时，会话返回重连流程。持续失败最终进入 held 或 logoff，不得在旧 key 上继续发送心跳。
 
