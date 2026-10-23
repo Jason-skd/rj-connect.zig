@@ -1,6 +1,7 @@
 //! Deterministic EAP-MD5 protocol machine and external event handling.
 
 const std = @import("std");
+const dhcp_poll = @import("dhcp_poll.zig");
 const eapol = @import("../protocol/eapol.zig");
 const session_outcome = @import("outcome.zig");
 const time = @import("time.zig");
@@ -42,8 +43,7 @@ const Connecting = struct {
 };
 
 const NetworkCompletion = struct {
-    deadline: std.Io.Timestamp,
-    poll_attempts: u8,
+    poll: dhcp_poll.State,
     peer_mac: [6]u8,
 };
 
@@ -123,7 +123,7 @@ pub const Engine = struct {
             .connecting => |state| state.deadline,
             .acquired => |state| state.deadline,
             .authenticating => |state| state.deadline,
-            .network_completion => |state| state.deadline,
+            .network_completion => |state| state.poll.deadline,
             .held => |state| state.deadline,
             .disconnected, .authenticated => null,
         };
@@ -139,7 +139,7 @@ pub const Engine = struct {
 
     pub fn dhcpPollAttempts(self: *const Engine) u8 {
         return switch (self.state) {
-            .network_completion => |state| state.poll_attempts,
+            .network_completion => |state| state.poll.attempts,
             else => 0,
         };
     }
@@ -364,8 +364,7 @@ pub const Engine = struct {
                 self.auth_failures = 0;
                 if (self.config.dhcp_second_auth and self.dhcp_step == .first) {
                     self.state = .{ .network_completion = .{
-                        .deadline = try addDuration(now, .fromSeconds(2)),
-                        .poll_attempts = 1,
+                        .poll = try dhcp_poll.State.begin(now),
                         .peer_mac = state.exchange.peer_mac,
                     } };
                     try builder.addAction(.poll_dhcp);
@@ -617,15 +616,14 @@ pub const Engine = struct {
             .network_completion => |state| state,
             else => return error.InvalidState,
         };
-        if (state.poll_attempts >= 21) {
+        const next = try state.poll.retry(now) orelse {
             self.failure_reason = .dhcp_timeout;
             try self.enterLogoff(state.peer_mac, builder);
             return;
-        }
+        };
 
         self.state = .{ .network_completion = .{
-            .deadline = try addDuration(now, .fromSeconds(2)),
-            .poll_attempts = state.poll_attempts + 1,
+            .poll = next,
             .peer_mac = state.peer_mac,
         } };
         try builder.addAction(.poll_dhcp);
@@ -664,7 +662,6 @@ pub const Engine = struct {
     ) Error!void {
         const destination = peer_mac orelse self.config.destination_mac;
         const frame = try self.allocator.alloc(u8, eapol.header_size);
-        errdefer self.allocator.free(frame);
         eapol.encodeLogoff(destination, self.config.source_mac, frame[0..eapol.header_size]);
         try builder.addFrame(frame);
         self.state = .disconnected;

@@ -134,7 +134,7 @@ pub const Session = struct {
         return switch (self.machine) {
             .empty => 0,
             .eap_md5 => |*engine| engine.dhcpPollAttempts(),
-            .peap => 0,
+            .peap => |*engine| engine.dhcpPollAttempts(),
             .direct => 0,
         };
     }

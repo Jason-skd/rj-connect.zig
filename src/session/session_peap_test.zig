@@ -1,4 +1,7 @@
 const std = @import("std");
+const crypto = @import("../protocol/crypto.zig");
+const des = @import("../protocol/des.zig");
+const direct = @import("../protocol/direct.zig");
 const eap = @import("../protocol/eap.zig");
 const eapol = @import("../protocol/eapol.zig");
 const vendor = @import("../protocol/vendor.zig");
@@ -98,11 +101,11 @@ fn directPeapConfig() PeapConfig {
     };
 }
 
-fn serverFields(output: []u8, include_radius: bool) ![]const u8 {
+fn serverFields(output: []u8, include_radius: bool, heartbeat_seconds: [4]u8) ![]const u8 {
     var offset: usize = 0;
     const fields = [_]vendor.Field{
         .{ .code = 0x56, .value = &.{ 0, 0, 0, 30 } },
-        .{ .code = 0x59, .value = &.{ 0, 0, 0, 10 } },
+        .{ .code = 0x59, .value = &heartbeat_seconds },
         .{ .code = 0x5a, .value = &.{ 0, 0, 0x1f, 0x90 } },
         .{ .code = 0x5b, .value = &.{ 192, 0, 2, 1 } },
         .{ .code = 0x5c, .value = "key-key!" },
@@ -119,20 +122,73 @@ fn serverFields(output: []u8, include_radius: bool) ![]const u8 {
     return output[0..offset];
 }
 
-fn drivePeapToWaitingDhcp(session: *Session, info: []const u8) !void {
+fn encodeDirectAck(
+    output: []u8,
+    id: u32,
+    session_id: u32,
+    direct_timestamp: u64,
+    sender: direct.Endpoint,
+    receiver: direct.Endpoint,
+    key: [8]u8,
+    iv: [8]u8,
+) ![]const u8 {
+    const encoded = try direct.encodeFrame(.{
+        .version = 1,
+        .code = 2,
+        .id = id,
+        .packet_len = direct.header_size,
+        .authenticator = @splat(0),
+        .session_id = session_id,
+        .timestamp = direct_timestamp,
+        .message_type = 1,
+        .flags = 0,
+        .total_len = 0,
+    }, &.{}, sender, receiver, output);
+    try direct.setAuthenticator(encoded, key, iv);
+    return encoded;
+}
+
+fn encodeDirectData(
+    output: []u8,
+    id: u32,
+    session_id: u32,
+    direct_timestamp: u64,
+    encrypted: []const u8,
+    sender: direct.Endpoint,
+    receiver: direct.Endpoint,
+    key: [8]u8,
+    iv: [8]u8,
+) ![]u8 {
+    const encoded = try direct.encodeFrame(.{
+        .version = 1,
+        .code = 1,
+        .id = id,
+        .packet_len = @intCast(direct.header_size + encrypted.len),
+        .authenticator = @splat(0),
+        .session_id = session_id,
+        .timestamp = direct_timestamp,
+        .message_type = 1,
+        .flags = 1,
+        .total_len = @intCast(encrypted.len),
+    }, encrypted, sender, receiver, output);
+    try direct.setAuthenticator(encoded, key, iv);
+    return encoded;
+}
+
+fn drivePeapToWaitingDhcp(allocator: std.mem.Allocator, session: *Session, info: []const u8) !void {
     var started = try session.step(timestamp(0), .start);
-    started.deinit(std.testing.allocator);
+    started.deinit(allocator);
     const identity = identityRequest(0x16);
     var acquired = try session.step(timestamp(std.time.ns_per_s), frameInput(session, &identity));
-    acquired.deinit(std.testing.allocator);
+    acquired.deinit(allocator);
     var identified = try session.step(timestamp(2 * std.time.ns_per_s), .{
         .credentials = .{ .username = "alice", .password = "secret" },
     });
-    identified.deinit(std.testing.allocator);
+    identified.deinit(allocator);
 
     const request = peapRequest(0x17);
     var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(session, &request));
-    selected.deinit(std.testing.allocator);
+    selected.deinit(allocator);
 
     var identity_buffer: [16]u8 = undefined;
     const inner_identity = innerRequest(&identity_buffer, 1, .identity, &.{});
@@ -146,12 +202,12 @@ fn drivePeapToWaitingDhcp(session: *Session, info: []const u8) !void {
             },
         },
     });
-    identity_batch.deinit(std.testing.allocator);
+    identity_batch.deinit(allocator);
 
     var protected_identity = try session.step(timestamp(5 * std.time.ns_per_s), .{
         .credentials = .{ .username = "alice", .password = "secret" },
     });
-    protected_identity.deinit(std.testing.allocator);
+    protected_identity.deinit(allocator);
 
     var challenge_buffer: [32]u8 = undefined;
     const challenge = innerRequest(&challenge_buffer, 2, .mschapv2, &.{ 1, 0x11 });
@@ -165,7 +221,7 @@ fn drivePeapToWaitingDhcp(session: *Session, info: []const u8) !void {
             },
         },
     });
-    challenge_batch.deinit(std.testing.allocator);
+    challenge_batch.deinit(allocator);
 
     var response = try session.step(timestamp(7 * std.time.ns_per_s), .{
         .external_result = .{
@@ -176,7 +232,7 @@ fn drivePeapToWaitingDhcp(session: *Session, info: []const u8) !void {
             } },
         },
     });
-    response.deinit(std.testing.allocator);
+    response.deinit(allocator);
 
     var success_buffer: [32]u8 = undefined;
     const success_request = innerRequest(&success_buffer, 3, .mschapv2, &.{ 3, 0 });
@@ -190,7 +246,7 @@ fn drivePeapToWaitingDhcp(session: *Session, info: []const u8) !void {
             },
         },
     });
-    success_batch.deinit(std.testing.allocator);
+    success_batch.deinit(allocator);
 
     var verified = try session.step(timestamp(9 * std.time.ns_per_s), .{
         .external_result = .{
@@ -201,7 +257,7 @@ fn drivePeapToWaitingDhcp(session: *Session, info: []const u8) !void {
             } },
         },
     });
-    verified.deinit(std.testing.allocator);
+    verified.deinit(allocator);
 
     var server_info_batch = try session.step(timestamp(10 * std.time.ns_per_s), .{
         .tunnel_output = .{
@@ -213,26 +269,26 @@ fn drivePeapToWaitingDhcp(session: *Session, info: []const u8) !void {
             },
         },
     });
-    server_info_batch.deinit(std.testing.allocator);
+    server_info_batch.deinit(allocator);
 
     const success = terminalRequest(0x17);
     var complete = try session.step(timestamp(11 * std.time.ns_per_s), frameInput(session, &success));
-    defer complete.deinit(std.testing.allocator);
+    defer complete.deinit(allocator);
     try std.testing.expectEqual(ActivePhase{ .peap = .waiting_dhcp }, complete.phase);
 }
 
-fn preparePeapSelection(session: *Session) !void {
+fn preparePeapSelection(allocator: std.mem.Allocator, session: *Session) !void {
     var started = try session.step(timestamp(0), .start);
-    started.deinit(std.testing.allocator);
+    started.deinit(allocator);
 
     const identity = identityRequest(0x16);
     var acquired = try session.step(timestamp(std.time.ns_per_s), frameInput(session, &identity));
-    acquired.deinit(std.testing.allocator);
+    acquired.deinit(allocator);
 
     var identified = try session.step(timestamp(2 * std.time.ns_per_s), .{
         .credentials = .{ .username = "alice", .password = "secret" },
     });
-    identified.deinit(std.testing.allocator);
+    identified.deinit(allocator);
 }
 
 test "server-selected PEAP enters a new generation and phase" {
@@ -243,7 +299,7 @@ test "server-selected PEAP enters a new generation and phase" {
     });
     defer session.deinit();
 
-    try preparePeapSelection(&session);
+    try preparePeapSelection(std.testing.allocator, &session);
     const previous_generation = session.currentGeneration();
     const request = peapRequest(0x17);
     var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &request));
@@ -403,6 +459,14 @@ test "PEAP tunnel drives TLS, inner EAP, MSCHAPv2, and DHCP waiting" {
     defer complete.deinit(std.testing.allocator);
     try std.testing.expectEqual(ActivePhase{ .peap = .waiting_dhcp }, complete.phase);
     try std.testing.expectEqual(Action.poll_dhcp, complete.actions[0]);
+    try std.testing.expectEqual(@as(u8, 1), session.dhcpPollAttempts());
+
+    var repoll = try session.step(timestamp(13 * std.time.ns_per_s), .{
+        .timer = session.currentGeneration(),
+    });
+    defer repoll.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Action.poll_dhcp, repoll.actions[0]);
+    try std.testing.expectEqual(@as(u8, 2), session.dhcpPollAttempts());
 }
 
 test "PEAP request without a PEAP configuration reports a missing dependency" {
@@ -412,7 +476,7 @@ test "PEAP request without a PEAP configuration reports a missing dependency" {
     });
     defer session.deinit();
 
-    try preparePeapSelection(&session);
+    try preparePeapSelection(std.testing.allocator, &session);
     const request = peapRequest(0x17);
     try std.testing.expectError(
         error.MissingDependency,
@@ -427,7 +491,7 @@ test "PEAP request is unsupported when PEAP is not allowed" {
     });
     defer session.deinit();
 
-    try preparePeapSelection(&session);
+    try preparePeapSelection(std.testing.allocator, &session);
     const request = peapRequest(0x17);
     try std.testing.expectError(
         error.UnsupportedEapMethod,
@@ -443,7 +507,7 @@ test "PEAP reassembles server TLS fragments before invoking the adapter" {
         .peap = peapConfig(),
     });
     defer session.deinit();
-    try preparePeapSelection(&session);
+    try preparePeapSelection(std.testing.allocator, &session);
 
     const first = peapRequest(0x17);
     var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &first));
@@ -461,6 +525,10 @@ test "PEAP reassembles server TLS fragments before invoking the adapter" {
     var waiting = try session.step(timestamp(4 * std.time.ns_per_s), frameInput(&session, first_fragment));
     defer waiting.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), waiting.actions.len);
+    try std.testing.expectError(
+        error.DuplicateFrame,
+        session.step(timestamp(4 * std.time.ns_per_s), frameInput(&session, first_fragment)),
+    );
 
     _ = try @import("../protocol/peap.zig").encode(.{}, null, "de", &payload);
     const second_fragment = peapFrame(&frame_buffer, 0x19, payload[0..3]);
@@ -470,6 +538,107 @@ test "PEAP reassembles server TLS fragments before invoking the adapter" {
     try std.testing.expectEqualSlices(u8, "abcde", delivered.actions[0].tunnel_input.bytes);
 }
 
+test "PEAP rejects a final TLS fragment that disagrees with its declared length" {
+    var session = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .allowed_methods = .{ .md5_challenge = false, .peap = true },
+        .peap = peapConfig(),
+    });
+    defer session.deinit();
+    try preparePeapSelection(std.testing.allocator, &session);
+
+    const request = peapRequest(0x17);
+    var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &request));
+    selected.deinit(std.testing.allocator);
+
+    var payload: [9]u8 = undefined;
+    _ = try @import("../protocol/peap.zig").encode(
+        .{ .more = true, .length_included = true },
+        5,
+        "abc",
+        &payload,
+    );
+    var frame_buffer: [64]u8 = undefined;
+    const first_fragment = peapFrame(&frame_buffer, 0x18, payload[0..8]);
+    var waiting = try session.step(timestamp(4 * std.time.ns_per_s), frameInput(&session, first_fragment));
+    waiting.deinit(std.testing.allocator);
+
+    _ = try @import("../protocol/peap.zig").encode(.{}, null, "d", &payload);
+    const short_fragment = peapFrame(&frame_buffer, 0x19, payload[0..2]);
+    try std.testing.expectError(
+        error.InvalidTunnelInput,
+        session.step(timestamp(5 * std.time.ns_per_s), frameInput(&session, short_fragment)),
+    );
+
+    _ = try @import("../protocol/peap.zig").encode(.{}, null, "de", &payload);
+    const final_fragment = peapFrame(&frame_buffer, 0x19, payload[0..3]);
+    var delivered = try session.step(timestamp(6 * std.time.ns_per_s), frameInput(&session, final_fragment));
+    defer delivered.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, "abcde", delivered.actions[0].tunnel_input.bytes);
+}
+
+test "PEAP rejects out-of-order fragments and conflicting declared lengths" {
+    var session = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .allowed_methods = .{ .md5_challenge = false, .peap = true },
+        .peap = peapConfig(),
+    });
+    defer session.deinit();
+    try preparePeapSelection(std.testing.allocator, &session);
+
+    const request = peapRequest(0x17);
+    var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &request));
+    selected.deinit(std.testing.allocator);
+
+    var payload: [16]u8 = undefined;
+    _ = try @import("../protocol/peap.zig").encode(
+        .{ .more = true, .length_included = true },
+        5,
+        "abc",
+        &payload,
+    );
+    var frame_buffer: [64]u8 = undefined;
+    const first_fragment = peapFrame(&frame_buffer, 0x18, payload[0..8]);
+    var waiting = try session.step(timestamp(4 * std.time.ns_per_s), frameInput(&session, first_fragment));
+    waiting.deinit(std.testing.allocator);
+
+    const old_fragment = peapFrame(&frame_buffer, 0x17, payload[0..1]);
+    try std.testing.expectError(
+        error.StaleIdentifier,
+        session.step(timestamp(5 * std.time.ns_per_s), frameInput(&session, old_fragment)),
+    );
+
+    _ = try @import("../protocol/peap.zig").encode(
+        .{ .more = true, .length_included = true },
+        6,
+        "d",
+        &payload,
+    );
+    const conflicting_fragment = peapFrame(&frame_buffer, 0x19, payload[0..6]);
+    try std.testing.expectError(
+        error.InvalidTunnelInput,
+        session.step(timestamp(6 * std.time.ns_per_s), frameInput(&session, conflicting_fragment)),
+    );
+
+    _ = try @import("../protocol/peap.zig").encode(.{}, null, "de", &payload);
+    const final_fragment = peapFrame(&frame_buffer, 0x19, payload[0..3]);
+    var delivered = try session.step(timestamp(7 * std.time.ns_per_s), frameInput(&session, final_fragment));
+    defer delivered.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, "abcde", delivered.actions[0].tunnel_input.bytes);
+
+    _ = try @import("../protocol/peap.zig").encode(
+        .{ .more = true, .length_included = true },
+        64 * 1024 + 1,
+        "x",
+        &payload,
+    );
+    const oversized_fragment = peapFrame(&frame_buffer, 0x1a, payload[0..6]);
+    try std.testing.expectError(
+        error.InvalidTunnelInput,
+        session.step(timestamp(8 * std.time.ns_per_s), frameInput(&session, oversized_fragment)),
+    );
+}
+
 test "PEAP TLS failure and unsupported modes do not advance the session" {
     var session = try Session.init(std.testing.allocator, .{
         .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
@@ -477,7 +646,7 @@ test "PEAP TLS failure and unsupported modes do not advance the session" {
         .peap = peapConfig(),
     });
     defer session.deinit();
-    try preparePeapSelection(&session);
+    try preparePeapSelection(std.testing.allocator, &session);
 
     const request = peapRequest(0x17);
     var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &request));
@@ -502,6 +671,34 @@ test "PEAP TLS failure and unsupported modes do not advance the session" {
     try std.testing.expectEqual(ActivePhase.idle, session.phase());
 }
 
+test "PEAP rejects plaintext before TLS establishment" {
+    var session = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .allowed_methods = .{ .md5_challenge = false, .peap = true },
+        .peap = peapConfig(),
+    });
+    defer session.deinit();
+    try preparePeapSelection(std.testing.allocator, &session);
+
+    const request = peapRequest(0x17);
+    var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &request));
+    selected.deinit(std.testing.allocator);
+
+    var identity_buffer: [16]u8 = undefined;
+    const inner_identity = innerRequest(&identity_buffer, 1, .identity, &.{});
+    try std.testing.expectError(
+        error.InvalidTunnelInput,
+        session.step(timestamp(4 * std.time.ns_per_s), .{ .tunnel_output = .{
+            .generation = session.currentGeneration(),
+            .output = .{
+                .status = .more_data,
+                .plaintext = inner_identity,
+            },
+        } }),
+    );
+    try std.testing.expectEqual(ActivePhase{ .peap = .handshake }, session.phase());
+}
+
 test "PEAP cancellation sends one logoff and reaches idle" {
     var session = try Session.init(std.testing.allocator, .{
         .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
@@ -509,7 +706,7 @@ test "PEAP cancellation sends one logoff and reaches idle" {
         .peap = peapConfig(),
     });
     defer session.deinit();
-    try preparePeapSelection(&session);
+    try preparePeapSelection(std.testing.allocator, &session);
 
     const request = peapRequest(0x17);
     var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &request));
@@ -531,7 +728,7 @@ test "PEAP rejects stale tunnel output and times out without leaking" {
         .auth_timeout = .fromSeconds(5),
     });
     defer session.deinit();
-    try preparePeapSelection(&session);
+    try preparePeapSelection(std.testing.allocator, &session);
     const old_generation = session.currentGeneration();
     const request = peapRequest(0x17);
     var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &request));
@@ -561,7 +758,7 @@ test "PEAP remote logoff ends the session without sending another frame" {
         .peap = peapConfig(),
     });
     defer session.deinit();
-    try preparePeapSelection(&session);
+    try preparePeapSelection(std.testing.allocator, &session);
     const request = peapRequest(0x17);
     var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &request));
     selected.deinit(std.testing.allocator);
@@ -593,6 +790,93 @@ test "PEAP configuration allocation failure does not leak" {
     );
 }
 
+test "PEAP TLS reassembly allocation failure preserves the queued fragment" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var session = try Session.init(failing.allocator(), .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .allowed_methods = .{ .md5_challenge = false, .peap = true },
+        .peap = peapConfig(),
+    });
+    defer session.deinit();
+    try preparePeapSelection(failing.allocator(), &session);
+
+    const request = peapRequest(0x17);
+    var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &request));
+    selected.deinit(failing.allocator());
+
+    var payload: [9]u8 = undefined;
+    _ = try @import("../protocol/peap.zig").encode(
+        .{ .more = true, .length_included = true },
+        5,
+        "abc",
+        &payload,
+    );
+    var frame_buffer: [64]u8 = undefined;
+    const first_fragment = peapFrame(&frame_buffer, 0x18, payload[0..8]);
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        session.step(timestamp(4 * std.time.ns_per_s), frameInput(&session, first_fragment)),
+    );
+    failing.fail_index = std.math.maxInt(usize);
+
+    var waiting = try session.step(timestamp(5 * std.time.ns_per_s), frameInput(&session, first_fragment));
+    defer waiting.deinit(failing.allocator());
+    try std.testing.expectEqual(@as(usize, 0), waiting.actions.len);
+}
+
+fn peapTunnelAllocationScenario(allocator: std.mem.Allocator) !void {
+    var session = try Session.init(allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .allowed_methods = .{ .md5_challenge = false, .peap = true },
+        .peap = peapConfig(),
+    });
+    defer session.deinit();
+
+    var info_buffer: [128]u8 = undefined;
+    const info = try serverFields(&info_buffer, true, .{ 0, 0, 0, 10 });
+    try drivePeapToWaitingDhcp(allocator, &session, info);
+}
+
+fn peapDirectAllocationScenario(allocator: std.mem.Allocator) !void {
+    var session = try Session.init(allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .allowed_methods = .{ .md5_challenge = false, .peap = true },
+        .peap = directPeapConfig(),
+    });
+    defer session.deinit();
+
+    var info_buffer: [128]u8 = undefined;
+    const info = try serverFields(&info_buffer, true, .{ 0, 0, 0, 10 });
+    try drivePeapToWaitingDhcp(allocator, &session, info);
+    var direct_outcome = try session.step(timestamp(12 * std.time.ns_per_s), .{
+        .external_result = .{
+            .generation = session.currentGeneration(),
+            .result = .{ .dhcp_lease = .{
+                .ip = .{ 192, 0, 2, 10 },
+                .netmask = .{ 255, 255, 255, 0 },
+                .gateway = .{ 192, 0, 2, 1 },
+                .dns = .{ 203, 0, 113, 53 },
+            } },
+        },
+    });
+    direct_outcome.deinit(allocator);
+}
+
+test "PEAP tunnel and Direct handoff clean up every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        peapTunnelAllocationScenario,
+        .{},
+    );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        peapDirectAllocationScenario,
+        .{},
+    );
+}
+
 test "complete PEAP DHCP lease starts Direct in the same lifecycle" {
     var session = try Session.init(std.testing.allocator, .{
         .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
@@ -602,11 +886,11 @@ test "complete PEAP DHCP lease starts Direct in the same lifecycle" {
     defer session.deinit();
 
     var info_buffer: [128]u8 = undefined;
-    const info = try serverFields(&info_buffer, true);
-    try drivePeapToWaitingDhcp(&session, info);
+    const info = try serverFields(&info_buffer, true, .{ 0, 0, 0, 10 });
+    try drivePeapToWaitingDhcp(std.testing.allocator, &session, info);
     const peap_generation = session.currentGeneration();
 
-    var direct = try session.step(timestamp(12 * std.time.ns_per_s), .{
+    var direct_outcome = try session.step(timestamp(12 * std.time.ns_per_s), .{
         .external_result = .{
             .generation = peap_generation,
             .result = .{ .dhcp_lease = .{
@@ -617,13 +901,122 @@ test "complete PEAP DHCP lease starts Direct in the same lifecycle" {
             } },
         },
     });
-    defer direct.deinit(std.testing.allocator);
+    defer direct_outcome.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(ActivePhase{ .direct = .initializing }, direct.phase);
+    try std.testing.expectEqual(ActivePhase{ .direct = .initializing }, direct_outcome.phase);
     try std.testing.expectEqual(ActivePhase{ .direct = .initializing }, session.phase());
     try std.testing.expect(!peap_generation.eql(session.currentGeneration()));
-    try std.testing.expectEqual(@as(usize, 1), direct.actions.len);
-    _ = try @import("../protocol/direct.zig").decodeFrame(direct.actions[0].send_frame);
+    try std.testing.expectEqual(@as(usize, 1), direct_outcome.actions.len);
+    _ = try direct.decodeFrame(direct_outcome.actions[0].send_frame);
+}
+
+test "PEAP Direct reauthentication returns idle and permits explicit restart" {
+    var session = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .allowed_methods = .{ .md5_challenge = false, .peap = true },
+        .peap = directPeapConfig(),
+    });
+    defer session.deinit();
+
+    var info_buffer: [128]u8 = undefined;
+    const info = try serverFields(&info_buffer, true, .{ 0, 0, 0, 0 });
+    try drivePeapToWaitingDhcp(std.testing.allocator, &session, info);
+
+    var started = try session.step(timestamp(12 * std.time.ns_per_s), .{
+        .external_result = .{
+            .generation = session.currentGeneration(),
+            .result = .{ .dhcp_lease = .{
+                .ip = .{ 192, 0, 2, 10 },
+                .netmask = .{ 255, 255, 255, 0 },
+                .gateway = .{ 192, 0, 2, 1 },
+                .dns = .{ 203, 0, 113, 53 },
+            } },
+        },
+    });
+    const handshake = try direct.decodeFrame(started.actions[0].send_frame);
+    started.deinit(std.testing.allocator);
+
+    var des_key: [8]u8 = undefined;
+    _ = try crypto.applyRc4("com.ruijie.www", "key-key!", &des_key);
+    var initial_iv: [8]u8 = undefined;
+    _ = try crypto.applyRc4("com.ruijie.www", "iv-iv-iv", &initial_iv);
+
+    var ack_buffer: [256]u8 = undefined;
+    const handshake_ack = try encodeDirectAck(
+        &ack_buffer,
+        handshake.header.id,
+        handshake.header.session_id,
+        handshake.header.timestamp,
+        handshake.destination,
+        handshake.source,
+        des_key,
+        initial_iv,
+    );
+    var acknowledged = try session.step(
+        timestamp(13 * std.time.ns_per_s),
+        frameInput(&session, handshake_ack),
+    );
+    const user_info = try direct.decodeFrame(acknowledged.actions[0].send_frame);
+    acknowledged.deinit(std.testing.allocator);
+
+    var user_ack_buffer: [256]u8 = undefined;
+    const user_ack = try encodeDirectAck(
+        &user_ack_buffer,
+        user_info.header.id,
+        user_info.header.session_id,
+        user_info.header.timestamp,
+        user_info.destination,
+        user_info.source,
+        des_key,
+        initial_iv,
+    );
+    var awaiting_result = try session.step(
+        timestamp(14 * std.time.ns_per_s),
+        frameInput(&session, user_ack),
+    );
+    awaiting_result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase{ .direct = .awaiting_result }, session.phase());
+
+    var result_payload: [16]u8 = @splat(0);
+    result_payload[0..13].* = .{
+        1,    1,   12,
+        0x09, 8,   0x02,
+        2,    'o', 'k',
+        0x13, 1,   1,
+        0,
+    };
+    var result_encrypted: [16]u8 = undefined;
+    _ = try des.encryptCbc(des_key, initial_iv, &result_payload, &result_encrypted);
+    var result_buffer: [256]u8 = undefined;
+    const result_frame = try encodeDirectData(
+        &result_buffer,
+        77,
+        user_info.header.session_id,
+        user_info.header.timestamp + 1,
+        &result_encrypted,
+        user_info.destination,
+        user_info.source,
+        des_key,
+        initial_iv,
+    );
+    var active = try session.step(
+        timestamp(15 * std.time.ns_per_s),
+        frameInput(&session, result_frame),
+    );
+    active.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase{ .direct = .active }, session.phase());
+
+    var reauth = try session.step(timestamp(45 * std.time.ns_per_s), .{
+        .timer = session.currentGeneration(),
+    });
+    defer reauth.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Action.reauth_required, reauth.actions[0]);
+    try std.testing.expectEqual(ActivePhase.idle, reauth.phase);
+
+    var restarted = try session.step(timestamp(46 * std.time.ns_per_s), .start);
+    defer restarted.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase{ .eap_md5 = .connecting }, restarted.phase);
+    try std.testing.expectEqual(@as(usize, 1), restarted.actions.len);
 }
 
 test "missing PEAP Direct parameters fail without leaving the waiting state" {
@@ -635,8 +1028,8 @@ test "missing PEAP Direct parameters fail without leaving the waiting state" {
     defer session.deinit();
 
     var info_buffer: [128]u8 = undefined;
-    const info = try serverFields(&info_buffer, false);
-    try drivePeapToWaitingDhcp(&session, info);
+    const info = try serverFields(&info_buffer, false, .{ 0, 0, 0, 10 });
+    try drivePeapToWaitingDhcp(std.testing.allocator, &session, info);
     const generation = session.currentGeneration();
 
     try std.testing.expectError(

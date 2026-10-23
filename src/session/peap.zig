@@ -1,6 +1,7 @@
 //! Deterministic PEAPv0 orchestration with caller-owned TLS and MSCHAPv2.
 
 const std = @import("std");
+const dhcp_poll = @import("dhcp_poll.zig");
 const eap = @import("../protocol/eap.zig");
 const eapol = @import("../protocol/eapol.zig");
 const peap = @import("../protocol/peap.zig");
@@ -47,6 +48,7 @@ pub const Machine = struct {
     peer_mac: [6]u8,
     generation: types.Generation,
     outer_identifier: u8,
+    last_outer_request_identifier: ?u8 = null,
     inner_identifier: ?u8 = null,
     last_outer_response_identifier: ?u8 = null,
     state: State = .handshake,
@@ -57,7 +59,7 @@ pub const Machine = struct {
     tls_expected_length: ?usize = null,
     auth_timeout: std.Io.Duration,
     deadline: std.Io.Timestamp,
-    dhcp_poll_attempts: u8 = 0,
+    dhcp_poll: dhcp_poll.State = .{},
     failure_reason: ?FailureReason = null,
     server_info: ruijie.ServerInfo = .{},
     username_gbk: ?[]u8 = null,
@@ -112,19 +114,23 @@ pub const Machine = struct {
     }
 
     pub fn nextDeadline(self: *const Machine) ?std.Io.Timestamp {
-        return if (self.state == .idle) null else self.deadline;
+        return switch (self.state) {
+            .idle => null,
+            .waiting_dhcp => self.dhcp_poll.deadline,
+            else => self.deadline,
+        };
     }
 
     pub fn isWaitingDhcp(self: *const Machine) bool {
         return self.state == .waiting_dhcp;
     }
 
-    pub fn readyDirectConfig(self: *const Machine) ?types.DirectSessionConfig {
-        return self.direct_ready;
+    pub fn dhcpPollAttempts(self: *const Machine) u8 {
+        return self.dhcp_poll.attempts;
     }
 
-    pub fn clearReadyDirect(self: *Machine) void {
-        self.direct_ready = null;
+    pub fn readyDirectConfig(self: *const Machine) ?types.DirectSessionConfig {
+        return self.direct_ready;
     }
 
     pub fn step(self: *Machine, now: std.Io.Timestamp, input: Input) Error!Outcome {
@@ -203,12 +209,18 @@ pub const Machine = struct {
         switch (packet.code) {
             .request => {
                 if (packet.type != .peap) return error.InvalidFrame;
+                if (self.last_outer_request_identifier != null and
+                    self.last_outer_request_identifier.? == packet.identifier)
+                {
+                    return error.DuplicateFrame;
+                }
                 if (packet.identifier != self.outer_identifier and
                     packet.identifier != self.outer_identifier +% 1)
                 {
                     return error.StaleIdentifier;
                 }
                 self.outer_identifier = packet.identifier;
+                self.last_outer_request_identifier = packet.identifier;
                 try self.handlePeapRequest(now, packet.data, builder, replacement_tls);
             },
             .success => {
@@ -219,8 +231,7 @@ pub const Machine = struct {
                     return error.InvalidFrame;
                 }
                 self.state = .waiting_dhcp;
-                self.deadline = try time.addDuration(now, .fromSeconds(2));
-                self.dhcp_poll_attempts = 1;
+                self.dhcp_poll = try dhcp_poll.State.begin(now);
                 try builder.addAction(.poll_dhcp);
             },
             .failure => try self.finish(.server_failure),
@@ -237,9 +248,15 @@ pub const Machine = struct {
     ) Error!void {
         const decoded = peap.decode(payload) catch return error.InvalidFrame;
         self.deadline = try time.addDuration(now, self.auth_timeout);
-        if (decoded.flags.start) self.tls_buffer = null;
+        if (decoded.flags.start) {
+            self.tls_buffer = null;
+            self.tls_expected_length = null;
+        }
         if (decoded.tls_message_length) |expected| {
             if (expected > 64 * 1024) return error.InvalidTunnelInput;
+            if (self.tls_expected_length) |current| {
+                if (current != expected) return error.InvalidTunnelInput;
+            }
             self.tls_expected_length = expected;
         }
 
@@ -256,12 +273,16 @@ pub const Machine = struct {
         if (self.tls_buffer) |buffer| @memcpy(combined[0..buffer.len], buffer);
         @memcpy(combined[current_len..], decoded.tls);
 
-        const complete = !decoded.flags.more and
-            (self.tls_expected_length == null or total_len == self.tls_expected_length.?);
-        if (!complete) {
+        if (decoded.flags.more) {
+            if (self.tls_expected_length) |expected| {
+                if (total_len >= expected) return error.InvalidTunnelInput;
+            }
             replacement_tls.* = combined;
             self.tls_buffer = combined;
             return;
+        }
+        if (self.tls_expected_length) |expected| {
+            if (total_len != expected) return error.InvalidTunnelInput;
         }
 
         self.tls_buffer = null;
@@ -284,6 +305,9 @@ pub const Machine = struct {
             return;
         }
         if (output.status == .established) self.tls_established = true;
+        if (output.plaintext.len != 0 and !self.tls_established) {
+            return error.InvalidTunnelInput;
+        }
 
         try self.addOutboundTunnelFrames(output.outbound_tls, builder);
         if (output.plaintext.len != 0) {
@@ -315,7 +339,6 @@ pub const Machine = struct {
                 return error.InvalidTunnelInput;
             const frame_len = eapol.header_size + 5 + encoded_peap.len;
             const frame = try self.allocator.alloc(u8, frame_len);
-            errdefer self.allocator.free(frame);
             _ = eapol.encodeEap(
                 self.peer_mac,
                 self.source_mac,
@@ -324,7 +347,10 @@ pub const Machine = struct {
                 .peap,
                 encoded_peap,
                 frame,
-            ) catch return error.InvalidTunnelInput;
+            ) catch {
+                self.allocator.free(frame);
+                return error.InvalidTunnelInput;
+            };
             try builder.addFrame(frame);
             self.last_outer_response_identifier = self.outer_identifier;
             offset += chunk_len;
@@ -531,17 +557,16 @@ pub const Machine = struct {
     }
 
     fn handleTimer(self: *Machine, now: std.Io.Timestamp, builder: *OutcomeBuilder) Error!void {
-        if (now.compare(.lt, self.deadline)) return error.TimerNotDue;
         if (self.state == .waiting_dhcp) {
-            if (self.dhcp_poll_attempts >= 21) {
+            const next = try self.dhcp_poll.retry(now) orelse {
                 try self.finish(.dhcp_timeout);
                 return;
-            }
-            self.dhcp_poll_attempts += 1;
-            self.deadline = try time.addDuration(now, .fromSeconds(2));
+            };
+            self.dhcp_poll = next;
             try builder.addAction(.poll_dhcp);
             return;
         }
+        if (now.compare(.lt, self.deadline)) return error.TimerNotDue;
         try self.finish(.auth_timeout);
     }
 
@@ -552,7 +577,6 @@ pub const Machine = struct {
 
     fn addLogoff(self: *Machine, builder: *OutcomeBuilder) Error!void {
         const frame = try self.allocator.alloc(u8, eapol.header_size);
-        errdefer self.allocator.free(frame);
         eapol.encodeLogoff(self.peer_mac, self.source_mac, frame[0..eapol.header_size]);
         try builder.addFrame(frame);
     }

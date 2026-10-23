@@ -200,11 +200,13 @@ pub const Machine = struct {
             self.timestamps,
             now,
         );
-        errdefer self.allocator.free(prepared.frame);
+        var frame_owned = true;
+        errdefer if (frame_owned) self.allocator.free(prepared.frame);
         const ack_deadline = try time.addDuration(now, self.config.ack_timeout);
 
         var builder = OutcomeBuilder.init(self.allocator);
         errdefer builder.deinit();
+        frame_owned = false;
         try builder.addFrame(prepared.frame);
         const actions = try builder.finish();
 
@@ -503,10 +505,12 @@ pub const Machine = struct {
             timestamp_update.state,
             now,
         );
-        errdefer self.allocator.free(prepared.frame);
+        var frame_owned = true;
+        errdefer if (frame_owned) self.allocator.free(prepared.frame);
         const ack_deadline = try time.addDuration(now, self.config.ack_timeout);
         var builder = OutcomeBuilder.init(self.allocator);
         errdefer builder.deinit();
+        frame_owned = false;
         try builder.addFrame(prepared.frame);
         const actions = try builder.finish();
 
@@ -928,10 +932,12 @@ pub const Machine = struct {
             self.timestamps,
             now,
         );
-        errdefer self.allocator.free(prepared.frame);
+        var frame_owned = true;
+        errdefer if (frame_owned) self.allocator.free(prepared.frame);
         const ack_deadline = try time.addDuration(now, self.config.ack_timeout);
         var builder = OutcomeBuilder.init(self.allocator);
         errdefer builder.deinit();
+        frame_owned = false;
         try builder.addFrame(prepared.frame);
         const actions = try builder.finish();
 
