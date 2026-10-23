@@ -11,6 +11,7 @@ pub const direct = @import("direct.zig");
 pub const sam = @import("sam.zig");
 pub const smp = @import("smp.zig");
 pub const crypto = @import("crypto.zig");
+pub const v3 = @import("v3.zig");
 pub const des = @import("des.zig");
 
 test {
@@ -25,5 +26,6 @@ test {
     _ = sam;
     _ = smp;
     _ = crypto;
+    _ = v3;
     _ = des;
 }
