@@ -171,7 +171,7 @@ client 获取方式：由 client 的 TLS engine 处理服务器 TLS 字节、产
 
 Linux 1.31 的构建事实已经确认：`tls_init` 使用 `TLSv1_method()` 创建 SSL context，并支持 `ca_cert`、`ca_path` 与连接级证书验证回调。该证据证明客户端库具备 TLS 1.0 系列协议能力和 CA 链验证入口，不证明目标服务器实际提供的证书、主机身份字段或最终协商版本。
 
-> TODO（当前版本待调查）：静态边界已确认；仍需通过目标认证握手记录服务器证书链、身份字段、指纹和实际协商 TLS 版本，形成目标部署 profile。
+> 运行调查（认证期）：认证期需记录服务器证书 DER、证书链、Subject/SAN、有效期、指纹和协商 TLS 版本，并由部署方确认信任锚与主机身份规则。静态不能替代这些值，因为证书由目标服务器在握手时提供，客户端构建只证明验证入口和能力。
 
 ### Client 输入：MSCHAPv2
 
@@ -188,9 +188,11 @@ Linux 1.31 内嵌 wpa_supplicant 的 `nt_password_hash` 已静态确认：输入
 
 因此中文密码的结果完全取决于 upstream 传入的字节编码；UTF-8 或 GBK 多字节序列都会被逐字节当成独立 UTF-16 code unit。
 
-macOS 1.35 主程序只表明 PEAP 依赖系统 Security/CoreWLAN 能力，未内嵌 `nt_password_hash` 或 MSCHAPv2 provider 实现。Windows 6.85 的 `SuEapPeerPeap32.dll`/`SuEapPeerPeap64.dll` 是 EAPHost 接口壳，通过命名管道与 PEAP provider 通信，并引用 `SuEapPeap.dll`；该实现 DLL 不在现有制品中。因此不能把 Linux 的逐字节规则外推到这两个平台。
+macOS 1.35 主程序只表明 PEAP 依赖系统 Security/CoreWLAN 能力，未内嵌 `nt_password_hash` 或 MSCHAPv2 provider 实现。Windows 6.85 的 `SuEapPeerPeap32.dll`/`SuEapPeerPeap64.dll` 是 EAPHost 代理壳，通过固定命名管道 `\\.\pipe\RJ_WLAN_PEAR_EAP_METHOD_P_@20110111@` 委托给 `SuEapPeap.dll`；代理 DLL 本身没有直接导入 MD4 或密码哈希实现。
 
-> TODO（当前版本待调查）：macOS 与 Windows 的密码转换位于当前静态制品边界之外；Windows 需取得 `SuEapPeap.dll`，两个平台最终都应在认证期用中文密码验证字符集、规范化和 UTF-16LE 结果。
+Windows 自解压包、`Setup_x86.zip`、安装归档、`SuInstaller.exe`、`SuInstallerInterface.dll` 和 `8021x.exe` 的命名资源均未提供 `SuEapPeap.dll`。`8021x.exe` 内部另含 `CEapPEAPThread`、MSCHAPv2 路径和 MD4 实现，但静态不能证明目标部署选择这条内部路径而不使用 EAPHost provider。因此不能把 Linux 的逐字节规则外推到 macOS 或 Windows。
+
+> 运行调查（认证期）：在目标 Windows 和 macOS 部署上使用中文密码完成一次 PEAP/MSCHAPv2 认证，记录实际 provider 路径和 UTF-16LE NT password hash 输入材料；Windows 若在安装目录找到 `SuEapPeap.dll`，须先按 SHA-256 绑定版本并静态复核，再做认证期验证。静态不能唯一确定，因为 Windows 实际 provider 缺失，macOS 实现在系统框架内，且两条路径的字符集和规范化行为都不可由主程序推定。
 
 确定性实现不应自行猜测缺失的服务器值。可由服务器字段、DHCP 结果和本机适配器权威导出的值应在协议层组合；时间起点、是否真实绑定本地端口、TLS 证书策略和平台 I/O 仍由 client adapter 提供。
 
@@ -207,7 +209,7 @@ Linux 1.31、macOS 1.35 和 Windows 6.85 的 Direct 端口回退均为对端 `80
 
 Windows 6.85 的 Direct 时间戳管理器创建时使用空表；空表查询返回 `0`，已有记录首次递增后的值为 `1`。其 `0x55` 编码器固定返回空值，`0x64` 只在 IPD 客户端检测状态成立时发送固定 `00 01`，其他字段的生成条件已按平台记录在[私有字段布局](private-fields.md)。这些静态结论仍不等于目标服务器要求的最小字段集合。
 
-> TODO（当前版本待调查）：PEAP 路径各字段的客户端回退值已静态定位；仍需通过目标认证交换确认服务器实际下发和接受的可选 Direct 字段集合。
+> 运行调查（认证期）：认证期记录目标 PEAP 路径实际发送的 `0x17`、`0x39`、`0x55`、`0x64`、客户端名称/版本和 IPv6 字段，以及服务器返回的私有参数；再用成功与拒绝结果确认最小必需集合。静态不能唯一确定，因为各平台编码器提供的是可选发送机制，服务器接受策略属于目标部署。
 
 > 当前 Zig 代码暂不实施：TLS 握手、证书验证、证书读取和 socket 生命周期。client 提交 TLS 字节、建立状态及验证结果。
 

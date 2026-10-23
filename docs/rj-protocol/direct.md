@@ -318,3 +318,5 @@ Windows 6.85 的 `CDirTranThread` 构造先把时间戳管理器指针 `+0x14c8`
 当前 rj-connect 要求 client 在无服务器 UTC 时显式提供单调起点；`local_udp_port = 20000` 则是当前库的原型默认策略，不是 Linux 1.31 客户端默认值。
 
 协议默认值已经明确：Linux、macOS 和 Windows 样本都使用对端 `8080`、本地 `80`；服务器字段 `0x5a`、`0x6e` 覆盖回退值。rj-connect 应把端口、时间戳策略和计数器生命周期收口到内部具名 Direct profile，不应继续要求 client 解释这些协议语义。
+
+> 运行调查（认证后 Direct）：保持认证成功后的当前连接，记录实际首发送时间戳、后续记录建立时点、fragment/correlation 递增和重发复用、UDP 端点与端口回退、缺失 `0x61` 时的 SAM/SMP 选择、心跳/重认证/重连时间线，以及同一 Windows 会话不同消息的 `0x4d`/`0x60`。静态代码已给出候选机制，但这些结论依赖真实会话状态和 socket 行为，不能用离线编码结果替代。

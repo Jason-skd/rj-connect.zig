@@ -84,7 +84,11 @@ Linux 1.31 的 `SET_EAP_TYPE()` 和 Windows 6.85 使用相同的 `AuthMode` 字�
 
 Windows 还分别读取 `support_md5`、`support_peap`、`support_tls_wired` 和 `support_tls_wireless`。启动认证时优先使用当前选中的 PEAP 方法；否则若当前方法为 EAP-TLS 则使用 type `13`；其余情况回退 PEAP。当前主路径没有把 `Support=5` 统一解释为 EAP type 位图；实际方法由具名 `AuthMode` 和 profile 字段决定。静态证据因此能确定支持矩阵、配置字段和客户端选择顺序，不能确定目标学校选择了哪个 `AuthMode`，也不能确定服务器实际回应哪条方法。
 
-> TODO（当前版本待调查）：目标学校实际使用的 EAP 路径只能通过认证交换确认；客户端构建绑定与部署配置必须形成具名 profile，不能由 client 在报文层自行切换。
+Windows 6.85 的 `Support`/`SupportNum` 已静态定位为配置保存器生成的 capacity bitmap/count：`support_md5`、`support_peap`、`support_tls_wired`、`support_tls_wireless` 分别置 bit `0..3`，count 为置位数量。随包 Windows profile 的 `Support=5` 因而表示 `md5+peap` 能力，不是 EAP type `5`。Linux 1.31 只把同名配置项存入 `SaveConfigureInfo`，未发现其认证消费者；不能把 Windows 位图含义反推到 Linux。
+
+三套客户端随包的 `SuConfig.dat` 已静态解码，但学校代码分别不同：Linux 为 `SCNU`，Windows 为 `gznu`，macOS 为 `gyzyu`。Windows 安装配置还包含 `CustomNameEnglish=GZSFDX_DOT1X` 和 EAP Type `25` 的 credential/WLAN profile。它们证明各自制品的定制内容，不能共同指向同一个目标学校。
+
+> 运行调查（认证期）：目标学校实际使用的客户端构建、`SchoolCode`、`AuthMode` 和服务器选择路径必须从断网后启动的一次完整认证交换确认。静态不能唯一确定，因为随包 profile 属于不同部署，服务器也可拒绝客户端首选方法并触发新请求。采集时须保存 START、每个 EAP Request/Response、Success/Failure、对应客户端文件摘要和部署 profile。
 
 ## 请求与响应分派
 
