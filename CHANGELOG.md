@@ -1,5 +1,28 @@
 # Changelog
 
+## f719ceb
+
+### Added
+
+- 新增 PEAPv0 外层阶段、EAP-PEAP TLS 分片重组和拥有型 `tunnel_input` 动作。
+- 新增 `tunnel_output` adapter 输入，用于返回待发送 TLS、已解密内层 EAP 和 TLS 状态。
+- 新增内层 EAP codec、EAP-MSCHAPv2 外部编排、锐捷紧凑字段及固定 PEAP 口令起始值。
+- 新增 PEAP V3 五模式摘要、MD5vz、SHA1vz、RIPEMDvz、Tiger 和 Whirlpool。
+- 新增完整 DHCP 租约字段，以及 PEAP 成功后自动构造 SAM/SMP Direct 配置的交接。
+- 新增 `MissingDependency`、`MissingDirectParameters`、`UnsupportedPeapMode` 和 `InvalidTunnelInput` 错误身份。
+
+### Changed
+
+- `Config` 现在声明允许的 EAP 方法并可携带 PEAP 配置；PEAP 输入材料由 `Session.init` 复制。
+- `ActivePhase` 新增 `peap`，`Input` 新增 `tunnel_output`，`Action` 新增隧道和 MSCHAPv2 外部请求。
+- 统一 DHCP external result 现在可携带 netmask、DNS 和备用 DNS；EAP-MD5 原有字段选择保持不变。
+
+### Limits
+
+- PEAP 范围限于 PEAPv0 与隧道内 EAP-MSCHAPv2；PEAPv1/v2 和 cryptobinding 返回 `UnsupportedPeapMode`。
+- TLS 握手、证书验证和 MSCHAPv2 计算仍完全由调用方负责。
+- 真实校园网互操作、目标认证器的 PEAP 模式与可选字段组合仍需 adapter 验证。
+
 ## 87abfde
 
 ### Added
