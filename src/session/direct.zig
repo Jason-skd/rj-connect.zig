@@ -856,10 +856,7 @@ pub const Machine = struct {
             .previous_phase = .{ .direct = .awaiting_result },
             .phase = .idle,
             .next_deadline = null,
-            .failure = if (result.message_gbk.len == 0)
-                .direct_result_timeout
-            else
-                .direct_result_rejected,
+            .failure = .direct_result_rejected,
             .generation = self.generation,
         };
     }
@@ -1686,6 +1683,32 @@ test "Direct maps a rejected SAM result to a terminal event" {
     const auth = result.actions[1].direct_auth_result;
     try std.testing.expect(!auth.success);
     try std.testing.expectEqualStrings("bad!!", auth.server_message_gbk.?);
+}
+
+test "Direct reports rejection when the server message is empty" {
+    const config = testConfig();
+    var machine = try Machine.init(std.testing.allocator, config, testTimestamp(0), .initial);
+    defer machine.deinit();
+    try enterAwaitingResult(&machine, config);
+
+    var payload: [16]u8 = @splat(0);
+    payload[0..10].* = .{
+        1,    1,    7,
+        0x09, 5,    0x02,
+        0,    0x13, 1,
+        0,
+    };
+    var encrypted: [16]u8 = undefined;
+    _ = try des.encryptCbc(config.des_key, config.initial_iv, &payload, &encrypted);
+    var result = try sendDataForTest(&machine, config, 50, 1, encrypted.len, 100, &encrypted);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(types.ActivePhase.idle, result.phase);
+    try std.testing.expectEqual(types.FailureReason.direct_result_rejected, result.failure.?);
+    try std.testing.expectEqual(@as(usize, 2), result.actions.len);
+    const auth = result.actions[1].direct_auth_result;
+    try std.testing.expect(!auth.success);
+    try std.testing.expectEqual(@as(?[]u8, null), auth.server_message_gbk);
 }
 
 test "Direct terminates when the SAM result deadline expires" {
