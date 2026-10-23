@@ -160,6 +160,34 @@ pub const Engine = struct {
         };
     }
 
+    pub const PeapHandoff = struct {
+        peer_mac: [6]u8,
+        identifier: u8,
+    };
+
+    /// Validates a PEAP request against the acquired Identity exchange without
+    /// mutating the engine. The caller can construct the PEAP machine first and
+    /// commit the handoff only after that construction succeeds.
+    pub fn peapHandoff(
+        self: *const Engine,
+        source: [6]u8,
+        eap: eapol.Eap,
+    ) Error!PeapHandoff {
+        if (eap.code != .request or eap.type != .peap) return error.InvalidFrame;
+        var exchange: ?Exchange = switch (self.state) {
+            .acquired => |state| state.exchange,
+            else => return error.InvalidState,
+        };
+        if (exchange.?.pending != null or exchange.?.last_response_identifier == null) {
+            return error.InvalidState;
+        }
+        try acceptRequestIdentifier(&exchange, source, eap, .peap);
+        return .{
+            .peer_mac = exchange.?.peer_mac,
+            .identifier = exchange.?.identifier,
+        };
+    }
+
     /// Accepts one external event and commits state only after every returned action is allocated.
     pub fn step(self: *Engine, now: std.Io.Timestamp, input: Input) Error!Outcome {
         if (self.last_now) |last_now| {

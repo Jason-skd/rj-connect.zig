@@ -5,14 +5,18 @@ const eapol = @import("../protocol/eapol.zig");
 const context = @import("context.zig");
 const direct_machine = @import("direct.zig");
 const eap_md5 = @import("eap_md5.zig");
+const peap_machine = @import("peap.zig");
 const session_outcome = @import("outcome.zig");
 const types = @import("types.zig");
 
 pub const Generation = types.Generation;
 pub const EapMd5Phase = types.EapMd5Phase;
+pub const PeapPhase = types.PeapPhase;
 pub const ActivePhase = types.ActivePhase;
 pub const DirectPhase = types.DirectPhase;
 pub const Config = types.Config;
+pub const EapMethods = types.EapMethods;
+pub const PeapConfig = types.PeapConfig;
 pub const CredentialPurpose = types.CredentialPurpose;
 pub const FailureReason = types.FailureReason;
 pub const DhcpStep = types.DhcpStep;
@@ -39,17 +43,20 @@ pub const Session = struct {
     context: context.Context,
     failure_reason: ?FailureReason,
     eap_peer_mac: ?[6]u8,
+    peap_config: ?PeapConfig,
     machine: Machine,
 
     const Machine = union(enum) {
         empty,
         eap_md5: eap_md5.Engine,
+        peap: peap_machine.Machine,
         direct: direct_machine.Machine,
 
         fn deinit(self: *Machine) void {
             switch (self.*) {
                 .empty => {},
                 .eap_md5 => |*engine| engine.deinit(),
+                .peap => |*engine| engine.deinit(),
                 .direct => |*engine| engine.deinit(),
             }
             self.* = .empty;
@@ -59,24 +66,36 @@ pub const Session = struct {
     /// Creates an idle session. No machine or frame is allocated until `step` starts one.
     pub fn init(allocator: std.mem.Allocator, config: Config) Error!Session {
         try config.validate();
+        var owned_peap: ?PeapConfig = null;
+        if (config.peap) |peap_config| {
+            owned_peap = try clonePeapConfig(allocator, peap_config);
+        }
+        errdefer if (owned_peap) |*peap_config| freePeapConfig(allocator, peap_config);
+
+        var owned_config = config;
+        owned_config.peap = null;
         return .{
             .allocator = allocator,
-            .config = config,
+            .config = owned_config,
             .context = .{},
             .failure_reason = null,
             .eap_peer_mac = null,
+            .peap_config = owned_peap,
             .machine = .empty,
         };
     }
 
     pub fn deinit(self: *Session) void {
         self.machine.deinit();
+        if (self.peap_config) |*config| freePeapConfig(self.allocator, config);
+        self.peap_config = null;
     }
 
     pub fn phase(self: *const Session) ActivePhase {
         return switch (self.machine) {
             .empty => .idle,
             .eap_md5 => |*engine| engine.phase(),
+            .peap => |*engine| engine.currentPhase(),
             .direct => |*engine| engine.currentPhase(),
         };
     }
@@ -85,6 +104,7 @@ pub const Session = struct {
         return switch (self.machine) {
             .empty => null,
             .eap_md5 => |*engine| engine.nextDeadline(),
+            .peap => |*engine| engine.nextDeadline(),
             .direct => |*engine| engine.nextDeadline(),
         };
     }
@@ -97,6 +117,7 @@ pub const Session = struct {
         return switch (self.machine) {
             .empty => .none,
             .eap_md5 => |*engine| engine.dhcpStep(),
+            .peap => |*engine| if (engine.phase == .waiting_dhcp) .first else .none,
             .direct => .none,
         };
     }
@@ -105,6 +126,7 @@ pub const Session = struct {
         return switch (self.machine) {
             .empty => 0,
             .eap_md5 => |*engine| engine.dhcpPollAttempts(),
+            .peap => 0,
             .direct => 0,
         };
     }
@@ -170,6 +192,19 @@ pub const Session = struct {
                             return error.StaleGeneration;
                         }
                         if (etherType(event.bytes) == 0x0800) return self.noop();
+                        if (etherType(event.bytes) == 0x888e) {
+                            const frame = eapol.decode(event.bytes) catch return error.InvalidFrame;
+                            if (frame.eap) |eap| {
+                                if (eap.code == .request and eap.type == .md5_challenge and
+                                    !self.config.allowed_methods.md5_challenge)
+                                {
+                                    return error.UnsupportedEapMethod;
+                                }
+                                if (eap.code == .request and eap.type == .peap) {
+                                    return self.startPeap(now, engine, frame);
+                                }
+                            }
+                        }
                     },
                     else => {},
                 }
@@ -179,6 +214,30 @@ pub const Session = struct {
                 self.failure_reason = engine.failure();
 
                 if (engine.phase() == .idle) {
+                    engine.deinit();
+                    self.machine = .empty;
+                }
+                return result;
+            },
+            .peap => |*engine| {
+                switch (input) {
+                    .frame => |event| {
+                        if (!event.generation.eql(self.context.generation)) {
+                            return error.StaleGeneration;
+                        }
+                    },
+                    .timer => |generation| {
+                        if (!generation.eql(self.context.generation)) {
+                            return error.StaleGeneration;
+                        }
+                    },
+                    else => {},
+                }
+                const result = try engine.step(now, input);
+                self.context.generation = engine.currentGeneration();
+                self.context.last_now = now;
+                self.failure_reason = result.failure;
+                if (result.phase == .idle) {
                     engine.deinit();
                     self.machine = .empty;
                 }
@@ -246,10 +305,51 @@ pub const Session = struct {
         return result;
     }
 
+    fn startPeap(
+        self: *Session,
+        now: std.Io.Timestamp,
+        eap_engine: *eap_md5.Engine,
+        frame: eapol.Frame,
+    ) Error!Outcome {
+        if (!self.config.allowed_methods.peap) return error.UnsupportedEapMethod;
+        const peap_config = self.peap_config orelse return error.MissingDependency;
+        const eap = frame.eap orelse return error.InvalidFrame;
+        const handoff = try eap_engine.peapHandoff(frame.source, eap);
+        const generation = try self.context.generation.next();
+
+        var candidate = try peap_machine.Machine.init(
+            peap_config,
+            .{ .peer_mac = handoff.peer_mac, .identifier = handoff.identifier },
+            now,
+            generation,
+            self.config.auth_timeout,
+        );
+        errdefer candidate.deinit();
+        const actions = try self.allocator.alloc(Action, 0);
+        errdefer self.allocator.free(actions);
+
+        const previous_phase = eap_engine.phase();
+        self.machine.deinit();
+        self.machine = .{ .peap = candidate };
+        self.context.generation = generation;
+        self.context.last_now = now;
+        self.failure_reason = null;
+        self.eap_peer_mac = handoff.peer_mac;
+        return .{
+            .actions = actions,
+            .previous_phase = previous_phase,
+            .phase = .{ .peap = .handshake },
+            .next_deadline = self.nextDeadline(),
+            .failure = null,
+            .generation = generation,
+        };
+    }
+
     fn cancel(self: *Session, now: std.Io.Timestamp) Error!Outcome {
         return switch (self.machine) {
             .empty => error.InvalidState,
             .eap_md5 => self.stepActive(now, .cancel),
+            .peap => self.stepActive(now, .cancel),
             .direct => self.finishDirect(now, true, .canceled),
         };
     }
@@ -304,4 +404,36 @@ pub const Session = struct {
 fn etherType(frame: []const u8) ?u16 {
     if (frame.len < 14) return null;
     return std.mem.readInt(u16, frame[12..14], .big);
+}
+
+fn clonePeapConfig(
+    allocator: std.mem.Allocator,
+    source: PeapConfig,
+) Error!PeapConfig {
+    var owned = source;
+    owned.v3_application_data = try allocator.dupe(u8, source.v3_application_data);
+    errdefer allocator.free(owned.v3_application_data);
+    owned.v3_dll_data = try allocator.dupe(u8, source.v3_dll_data);
+    errdefer allocator.free(owned.v3_dll_data);
+    owned.service_name_gbk = try allocator.dupe(u8, source.service_name_gbk);
+    errdefer allocator.free(owned.service_name_gbk);
+    owned.program_name_gbk = try allocator.dupe(u8, source.program_name_gbk);
+    errdefer allocator.free(owned.program_name_gbk);
+    owned.disk_serial_ascii = try allocator.dupe(u8, source.disk_serial_ascii);
+    errdefer allocator.free(owned.disk_serial_ascii);
+    owned.security_domain_ascii = try allocator.dupe(u8, source.security_domain_ascii);
+    errdefer allocator.free(owned.security_domain_ascii);
+    owned.ipd_result = try allocator.dupe(u8, source.ipd_result);
+    return owned;
+}
+
+fn freePeapConfig(allocator: std.mem.Allocator, config: *PeapConfig) void {
+    allocator.free(config.v3_application_data);
+    allocator.free(config.v3_dll_data);
+    allocator.free(config.service_name_gbk);
+    allocator.free(config.program_name_gbk);
+    allocator.free(config.disk_serial_ascii);
+    allocator.free(config.security_domain_ascii);
+    allocator.free(config.ipd_result);
+    config.* = undefined;
 }

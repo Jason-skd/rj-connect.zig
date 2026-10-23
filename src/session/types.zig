@@ -28,9 +28,62 @@ pub const EapMd5Phase = enum {
     held,
 };
 
+pub const PeapPhase = enum {
+    handshake,
+    authenticating,
+    waiting_dhcp,
+};
+
+pub const EapMethods = struct {
+    md5_challenge: bool = true,
+    peap: bool = false,
+};
+
+pub const PeapConfig = struct {
+    v3_application_data: []const u8,
+    v3_dll_data: []const u8,
+    service_name_gbk: []const u8 = &.{},
+    program_name_gbk: []const u8 = "8021x.exe",
+    client_version: [4]u8 = .{ 1, 33, 1, 2 },
+    os_bits: u8 = 0x40,
+    disk_serial_ascii: []const u8 = &.{},
+    security_domain_ascii: []const u8 = &.{},
+    security_check_ok: bool = true,
+    ipd_result: []const u8 = &.{},
+    ipv6_addresses: [4]?[16]u8 = .{ null, null, null, null },
+    direct_max_version: u8 = 2,
+    tls_fragment_size: usize = 1200,
+    local_udp_port: u16 = 20000,
+    direct_session_id: ?u32 = null,
+
+    pub fn validate(self: PeapConfig) Error!void {
+        if (self.v3_application_data.len == 0 or
+            self.v3_dll_data.len == 0 or
+            self.v3_application_data.len > max_v3_input_size or
+            self.v3_dll_data.len > max_v3_input_size or
+            self.service_name_gbk.len > 32 or
+            self.program_name_gbk.len == 0 or
+            self.program_name_gbk.len > 32 or
+            self.disk_serial_ascii.len > 64 or
+            self.security_domain_ascii.len > 255 or
+            self.ipd_result.len > 255 or
+            self.tls_fragment_size == 0 or
+            self.tls_fragment_size > max_tls_fragment_size or
+            (self.os_bits != 0x20 and self.os_bits != 0x40) or
+            self.direct_max_version == 0)
+        {
+            return error.InvalidConfig;
+        }
+    }
+};
+
+pub const max_v3_input_size = 16 * 1024;
+pub const max_tls_fragment_size = 16 * 1024;
+
 pub const ActivePhase = union(enum) {
     idle,
     eap_md5: EapMd5Phase,
+    peap: PeapPhase,
     direct: DirectPhase,
 };
 
@@ -43,6 +96,8 @@ pub const DirectPhase = enum {
 pub const Config = struct {
     source_mac: [6]u8,
     destination_mac: [6]u8 = eapol.default_destination,
+    allowed_methods: EapMethods = .{},
+    peap: ?PeapConfig = null,
     start_timeout: std.Io.Duration = .fromSeconds(30),
     auth_timeout: std.Io.Duration = .fromSeconds(30),
     held_timeout: std.Io.Duration = .fromSeconds(30),
@@ -59,6 +114,10 @@ pub const Config = struct {
         {
             return error.InvalidConfig;
         }
+        if (!self.allowed_methods.md5_challenge and !self.allowed_methods.peap) {
+            return error.InvalidConfig;
+        }
+        if (self.peap) |peap_config| try peap_config.validate();
     }
 };
 
@@ -215,6 +274,10 @@ pub const Error = error{
     StaleIdentifier,
     TimerNotDue,
     UnsupportedEapMethod,
+    UnsupportedPeapMode,
+    MissingDependency,
+    MissingDirectParameters,
+    InvalidTunnelInput,
     TimeWentBackwards,
     TimestampOverflow,
     StaleGeneration,
