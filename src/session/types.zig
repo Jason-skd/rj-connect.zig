@@ -43,6 +43,7 @@ pub const PeapConfig = struct {
     v3_application_data: []const u8,
     v3_dll_data: []const u8,
     service_name_gbk: []const u8 = &.{},
+    alternate_dns_text: []const u8 = &.{},
     program_name_gbk: []const u8 = "8021x.exe",
     client_version: [4]u8 = .{ 1, 33, 1, 2 },
     disk_serial_ascii: []const u8 = &.{},
@@ -55,6 +56,7 @@ pub const PeapConfig = struct {
     tls_fragment_size: usize = 1200,
     local_udp_port: u16 = 20000,
     direct_session_id: ?u32 = null,
+    network: ?DirectNetworkInfo = null,
 
     pub fn validate(self: PeapConfig) Error!void {
         if (self.v3_application_data.len == 0 or
@@ -62,6 +64,7 @@ pub const PeapConfig = struct {
             self.v3_application_data.len > max_v3_input_size or
             self.v3_dll_data.len > max_v3_input_size or
             self.service_name_gbk.len > 32 or
+            self.alternate_dns_text.len > 247 or
             self.program_name_gbk.len == 0 or
             self.program_name_gbk.len > 32 or
             self.disk_serial_ascii.len > 64 or
@@ -124,6 +127,7 @@ pub const CredentialPurpose = enum {
     identity,
     md5_challenge,
     credential_request,
+    peap_identity,
 };
 
 pub const FailureReason = enum {
@@ -137,6 +141,8 @@ pub const FailureReason = enum {
     direct_result_rejected,
     direct_result_timeout,
     smp_initialization_timeout,
+    tls_failed,
+    mschapv2_failed,
 };
 
 pub const DhcpStep = enum(u8) {
@@ -152,11 +158,60 @@ pub const Credentials = struct {
 
 pub const DhcpLease = struct {
     ip: ?[4]u8 = null,
+    netmask: ?[4]u8 = null,
     gateway: ?[4]u8 = null,
+    dns: ?[4]u8 = null,
+    alternate_dns: ?[4]u8 = null,
+};
+
+pub const TunnelOperation = enum {
+    process_server_tls,
+    protect_inner_eap,
+};
+
+pub const TunnelInput = struct {
+    operation: TunnelOperation,
+    bytes: []u8,
+};
+
+pub const TunnelStatus = enum {
+    more_data,
+    established,
+    failed,
+};
+
+pub const TunnelOutput = struct {
+    version: u8 = 0,
+    cryptobinding: bool = false,
+    status: TunnelStatus,
+    outbound_tls: []const u8 = &.{},
+    plaintext: []const u8 = &.{},
+};
+
+pub const TunnelOutputInput = struct {
+    generation: Generation,
+    output: TunnelOutput,
+};
+
+pub const Mschapv2Challenge = struct {
+    identifier: u8,
+    request_data: []u8,
+};
+
+pub const Mschapv2Response = struct {
+    credentials: Credentials,
+    response_data: []const u8,
+};
+
+pub const Mschapv2Success = struct {
+    verified: bool,
+    response_data: []const u8,
 };
 
 pub const ExternalResult = union(enum) {
     dhcp_lease: DhcpLease,
+    mschapv2_response: Mschapv2Response,
+    mschapv2_success: Mschapv2Success,
 };
 
 pub const ExternalResultInput = struct {
@@ -260,6 +315,7 @@ pub const Input = union(enum) {
     direct_session: DirectSessionConfig,
     timer: Generation,
     credentials: Credentials,
+    tunnel_output: TunnelOutputInput,
     external_result: ExternalResultInput,
 };
 

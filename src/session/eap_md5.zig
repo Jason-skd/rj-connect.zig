@@ -225,6 +225,7 @@ pub const Engine = struct {
                 try next.handleTimer(now, &builder);
             },
             .cancel => try next.handleCancel(&builder),
+            .tunnel_output => return error.InvalidState,
             .external_result => |event| {
                 if (!event.generation.eql(next.generation)) return error.StaleGeneration;
                 try next.handleExternalResult(now, event.result, &builder);
@@ -607,6 +608,7 @@ pub const Engine = struct {
                 try self.enterConnecting(now, 1);
                 try builder.addFrame(try self.makeStartFrame());
             },
+            .mschapv2_response, .mschapv2_success => return error.InvalidState,
         }
     }
 

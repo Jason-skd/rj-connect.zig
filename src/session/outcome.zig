@@ -7,6 +7,9 @@ pub const Action = union(enum) {
     send_frame: []u8,
     request_credentials: types.CredentialPurpose,
     poll_dhcp,
+    tunnel_input: types.TunnelInput,
+    authenticate_mschapv2: types.Mschapv2Challenge,
+    verify_mschapv2: types.Mschapv2Challenge,
     direct_auth_result: types.DirectAuthResult,
     reauth_required,
 };
@@ -35,6 +38,9 @@ pub fn freeActions(allocator: std.mem.Allocator, actions: []Action) void {
 fn freeAction(allocator: std.mem.Allocator, action: Action) void {
     switch (action) {
         .send_frame => |frame| allocator.free(frame),
+        .tunnel_input => |input| allocator.free(input.bytes),
+        .authenticate_mschapv2 => |challenge| allocator.free(challenge.request_data),
+        .verify_mschapv2 => |challenge| allocator.free(challenge.request_data),
         .direct_auth_result => |result| {
             if (result.server_message_gbk) |message| allocator.free(message);
         },
@@ -45,7 +51,7 @@ fn freeAction(allocator: std.mem.Allocator, action: Action) void {
 /// Builds one transaction's actions and owns any frame allocated before commit.
 pub const OutcomeBuilder = struct {
     allocator: std.mem.Allocator,
-    actions: [8]Action = undefined,
+    actions: [32]Action = undefined,
     action_count: usize = 0,
     transferred: bool = false,
 

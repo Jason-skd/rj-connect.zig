@@ -180,6 +180,7 @@ pub const Machine = struct {
                 if (!generation.eql(self.generation)) return error.StaleGeneration;
                 return self.handleTimer(now);
             },
+            .tunnel_output => error.InvalidState,
             else => error.InvalidState,
         };
     }

@@ -22,6 +22,14 @@ pub const FailureReason = types.FailureReason;
 pub const DhcpStep = types.DhcpStep;
 pub const Credentials = types.Credentials;
 pub const DhcpLease = types.DhcpLease;
+pub const TunnelOperation = types.TunnelOperation;
+pub const TunnelInput = types.TunnelInput;
+pub const TunnelStatus = types.TunnelStatus;
+pub const TunnelOutput = types.TunnelOutput;
+pub const TunnelOutputInput = types.TunnelOutputInput;
+pub const Mschapv2Challenge = types.Mschapv2Challenge;
+pub const Mschapv2Response = types.Mschapv2Response;
+pub const Mschapv2Success = types.Mschapv2Success;
 pub const ExternalResult = types.ExternalResult;
 pub const ExternalResultInput = types.ExternalResultInput;
 pub const FrameInput = types.FrameInput;
@@ -117,7 +125,7 @@ pub const Session = struct {
         return switch (self.machine) {
             .empty => .none,
             .eap_md5 => |*engine| engine.dhcpStep(),
-            .peap => |*engine| if (engine.phase == .waiting_dhcp) .first else .none,
+            .peap => |*engine| if (engine.isWaitingDhcp()) .first else .none,
             .direct => .none,
         };
     }
@@ -201,7 +209,7 @@ pub const Session = struct {
                                     return error.UnsupportedEapMethod;
                                 }
                                 if (eap.code == .request and eap.type == .peap) {
-                                    return self.startPeap(now, engine, frame);
+                                    return self.startPeap(now, engine, frame, event.bytes);
                                 }
                             }
                         }
@@ -310,6 +318,7 @@ pub const Session = struct {
         now: std.Io.Timestamp,
         eap_engine: *eap_md5.Engine,
         frame: eapol.Frame,
+        bytes: []const u8,
     ) Error!Outcome {
         if (!self.config.allowed_methods.peap) return error.UnsupportedEapMethod;
         const peap_config = self.peap_config orelse return error.MissingDependency;
@@ -318,15 +327,20 @@ pub const Session = struct {
         const generation = try self.context.generation.next();
 
         var candidate = try peap_machine.Machine.init(
+            self.allocator,
             peap_config,
             .{ .peer_mac = handoff.peer_mac, .identifier = handoff.identifier },
+            self.config.source_mac,
             now,
             generation,
             self.config.auth_timeout,
         );
         errdefer candidate.deinit();
-        const actions = try self.allocator.alloc(Action, 0);
-        errdefer self.allocator.free(actions);
+        var result = try candidate.step(now, .{ .frame = .{
+            .generation = generation,
+            .bytes = bytes,
+        } });
+        errdefer session_outcome.freeActions(self.allocator, result.actions);
 
         const previous_phase = eap_engine.phase();
         self.machine.deinit();
@@ -335,14 +349,10 @@ pub const Session = struct {
         self.context.last_now = now;
         self.failure_reason = null;
         self.eap_peer_mac = handoff.peer_mac;
-        return .{
-            .actions = actions,
-            .previous_phase = previous_phase,
-            .phase = .{ .peap = .handshake },
-            .next_deadline = self.nextDeadline(),
-            .failure = null,
-            .generation = generation,
-        };
+        result.previous_phase = previous_phase;
+        result.generation = generation;
+        result.next_deadline = self.nextDeadline();
+        return result;
     }
 
     fn cancel(self: *Session, now: std.Io.Timestamp) Error!Outcome {
@@ -417,6 +427,8 @@ fn clonePeapConfig(
     errdefer allocator.free(owned.v3_dll_data);
     owned.service_name_gbk = try allocator.dupe(u8, source.service_name_gbk);
     errdefer allocator.free(owned.service_name_gbk);
+    owned.alternate_dns_text = try allocator.dupe(u8, source.alternate_dns_text);
+    errdefer allocator.free(owned.alternate_dns_text);
     owned.program_name_gbk = try allocator.dupe(u8, source.program_name_gbk);
     errdefer allocator.free(owned.program_name_gbk);
     owned.disk_serial_ascii = try allocator.dupe(u8, source.disk_serial_ascii);
@@ -431,6 +443,7 @@ fn freePeapConfig(allocator: std.mem.Allocator, config: *PeapConfig) void {
     allocator.free(config.v3_application_data);
     allocator.free(config.v3_dll_data);
     allocator.free(config.service_name_gbk);
+    allocator.free(config.alternate_dns_text);
     allocator.free(config.program_name_gbk);
     allocator.free(config.disk_serial_ascii);
     allocator.free(config.security_domain_ascii);
