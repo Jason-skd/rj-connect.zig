@@ -523,6 +523,76 @@ test "PEAP cancellation sends one logoff and reaches idle" {
     try std.testing.expectEqual(eapol.PacketType.logoff, logoff.packet_type);
 }
 
+test "PEAP rejects stale tunnel output and times out without leaking" {
+    var session = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .allowed_methods = .{ .md5_challenge = false, .peap = true },
+        .peap = peapConfig(),
+        .auth_timeout = .fromSeconds(5),
+    });
+    defer session.deinit();
+    try preparePeapSelection(&session);
+    const old_generation = session.currentGeneration();
+    const request = peapRequest(0x17);
+    var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &request));
+    selected.deinit(std.testing.allocator);
+
+    try std.testing.expectError(
+        error.StaleGeneration,
+        session.step(timestamp(4 * std.time.ns_per_s), .{ .tunnel_output = .{
+            .generation = old_generation,
+            .output = .{ .status = .established },
+        } }),
+    );
+    try std.testing.expectEqual(ActivePhase{ .peap = .handshake }, session.phase());
+
+    var timed_out = try session.step(timestamp(8 * std.time.ns_per_s), .{
+        .timer = session.currentGeneration(),
+    });
+    defer timed_out.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase.idle, timed_out.phase);
+    try std.testing.expectEqual(session_api.FailureReason.auth_timeout, timed_out.failure.?);
+}
+
+test "PEAP remote logoff ends the session without sending another frame" {
+    var session = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .allowed_methods = .{ .md5_challenge = false, .peap = true },
+        .peap = peapConfig(),
+    });
+    defer session.deinit();
+    try preparePeapSelection(&session);
+    const request = peapRequest(0x17);
+    var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(&session, &request));
+    selected.deinit(std.testing.allocator);
+
+    var logoff_frame: [eapol.header_size]u8 = undefined;
+    eapol.encodeLogoff(
+        .{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff },
+        .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        &logoff_frame,
+    );
+    var ended = try session.step(timestamp(4 * std.time.ns_per_s), frameInput(&session, &logoff_frame));
+    defer ended.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase.idle, ended.phase);
+    try std.testing.expectEqual(@as(usize, 0), ended.actions.len);
+    try std.testing.expectEqual(session_api.FailureReason.server_logoff, ended.failure.?);
+}
+
+test "PEAP configuration allocation failure does not leak" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 0,
+    });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Session.init(failing.allocator(), .{
+            .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+            .allowed_methods = .{ .md5_challenge = false, .peap = true },
+            .peap = peapConfig(),
+        }),
+    );
+}
+
 test "complete PEAP DHCP lease starts Direct in the same lifecycle" {
     var session = try Session.init(std.testing.allocator, .{
         .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },

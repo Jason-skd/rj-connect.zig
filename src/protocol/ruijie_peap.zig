@@ -185,6 +185,16 @@ pub fn parseServerInfo(input: []const u8) ParseError!ServerInfo {
     return result;
 }
 
+pub fn mergeServerInfo(current: ServerInfo, update: ServerInfo) ServerInfo {
+    var result = current;
+    inline for (@typeInfo(ServerInfo).@"struct".field_names) |field_name| {
+        if (@field(update, field_name)) |value| {
+            @field(result, field_name) = value;
+        }
+    }
+    return result;
+}
+
 const Writer = struct {
     output: []u8,
     offset: usize = 0,

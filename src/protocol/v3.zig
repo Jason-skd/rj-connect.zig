@@ -736,6 +736,16 @@ test "V3 digest matches all five fixed modes" {
     }
 }
 
+test "V3 all-byte challenge selects and matches mode three" {
+    const challenge = [16]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    var output: [128]u8 = undefined;
+    const result = try digest("app-data", "dll-data", challenge, &output);
+    try std.testing.expectEqualStrings(
+        "717fb3022cecc0abe02fd540f6c7bdfa463fde8812949df7870cd22a82222ad6102c5f9eaf8f27bbb791929374575b13b8a196fcb68ab083eaaa90f1be2ee6e6",
+        result,
+    );
+}
+
 test "V3 challenge selector interprets bytes as signed" {
     var challenge: [16]u8 = @splat(0);
     challenge[0] = 0xff;

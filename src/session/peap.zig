@@ -55,6 +55,7 @@ pub const Machine = struct {
     inner_success: bool = false,
     tls_buffer: ?[]u8 = null,
     tls_expected_length: ?usize = null,
+    auth_timeout: std.Io.Duration,
     deadline: std.Io.Timestamp,
     dhcp_poll_attempts: u8 = 0,
     failure_reason: ?FailureReason = null,
@@ -79,6 +80,7 @@ pub const Machine = struct {
             .peer_mac = handoff.peer_mac,
             .generation = generation,
             .outer_identifier = handoff.identifier,
+            .auth_timeout = auth_timeout,
             .deadline = try time.addDuration(now, auth_timeout),
         };
     }
@@ -128,10 +130,16 @@ pub const Machine = struct {
     pub fn step(self: *Machine, now: std.Io.Timestamp, input: Input) Error!Outcome {
         var next = self.*;
         const old_tls = self.tls_buffer;
+        const old_username = self.username_gbk;
         var replacement_tls: ?[]u8 = null;
         var builder = OutcomeBuilder.init(self.allocator);
         errdefer builder.deinit();
         errdefer if (replacement_tls) |buffer| self.allocator.free(buffer);
+        errdefer if (next.username_gbk != null and
+            (old_username == null or next.username_gbk.?.ptr != old_username.?.ptr))
+        {
+            self.allocator.free(next.username_gbk.?);
+        };
 
         const previous_phase = self.currentPhase();
         switch (input) {
@@ -161,6 +169,11 @@ pub const Machine = struct {
         if (old_tls) |buffer| {
             if (self.tls_buffer == null or self.tls_buffer.?.ptr != buffer.ptr) {
                 self.allocator.free(buffer);
+            }
+        }
+        if (old_username) |username| {
+            if (self.username_gbk == null or self.username_gbk.?.ptr != username.ptr) {
+                self.allocator.free(username);
             }
         }
         return .{
@@ -223,7 +236,7 @@ pub const Machine = struct {
         replacement_tls: *?[]u8,
     ) Error!void {
         const decoded = peap.decode(payload) catch return error.InvalidFrame;
-        self.deadline = try time.addDuration(now, .fromSeconds(30));
+        self.deadline = try time.addDuration(now, self.auth_timeout);
         if (decoded.flags.start) self.tls_buffer = null;
         if (decoded.tls_message_length) |expected| {
             if (expected > 64 * 1024) return error.InvalidTunnelInput;
@@ -280,7 +293,7 @@ pub const Machine = struct {
             self.advanceProtectedStage();
         }
         if (self.state != .idle and self.state != .waiting_dhcp) {
-            self.deadline = try time.addDuration(now, .fromSeconds(30));
+            self.deadline = try time.addDuration(now, self.auth_timeout);
         }
     }
 
@@ -325,18 +338,20 @@ pub const Machine = struct {
         builder: *OutcomeBuilder,
     ) Error!void {
         const packet = eap.decodePrefix(plaintext) catch {
-            self.server_info = ruijie.parseServerInfo(plaintext) catch
+            const parsed = ruijie.parseServerInfo(plaintext) catch
                 return error.InvalidTunnelInput;
+            self.server_info = ruijie.mergeServerInfo(self.server_info, parsed);
             return;
         };
         if (packet.encoded_len < plaintext.len) {
-            self.server_info = ruijie.parseServerInfo(plaintext[packet.encoded_len..]) catch
+            const parsed = ruijie.parseServerInfo(plaintext[packet.encoded_len..]) catch
                 return error.InvalidTunnelInput;
+            self.server_info = ruijie.mergeServerInfo(self.server_info, parsed);
         }
         if (packet.code == .success) {
             self.inner_success = true;
             self.state = .awaiting_outer_success;
-            self.deadline = try time.addDuration(now, .fromSeconds(30));
+            self.deadline = try time.addDuration(now, self.auth_timeout);
             return;
         }
         if (packet.code == .failure) {
@@ -351,7 +366,7 @@ pub const Machine = struct {
         switch (packet.type orelse return error.InvalidTunnelInput) {
             .identity => {
                 self.state = .awaiting_identity;
-                self.deadline = try time.addDuration(now, .fromSeconds(30));
+                self.deadline = try time.addDuration(now, self.auth_timeout);
                 try builder.addAction(.{ .request_credentials = .peap_identity });
             },
             .mschapv2 => {
@@ -375,7 +390,7 @@ pub const Machine = struct {
                     },
                     else => return error.InvalidTunnelInput,
                 }
-                self.deadline = try time.addDuration(now, .fromSeconds(30));
+                self.deadline = try time.addDuration(now, self.auth_timeout);
             },
             else => return error.InvalidTunnelInput,
         }
@@ -406,7 +421,7 @@ pub const Machine = struct {
         } });
         self.state = .protecting;
         self.protect_stage = .identity;
-        self.deadline = try time.addDuration(now, .fromSeconds(30));
+        self.deadline = try time.addDuration(now, self.auth_timeout);
     }
 
     fn handleExternalResult(
@@ -441,7 +456,7 @@ pub const Machine = struct {
                 self.inner_success = true;
                 self.state = .protecting;
                 self.protect_stage = .mschapv2_success;
-                self.deadline = try time.addDuration(now, .fromSeconds(30));
+                self.deadline = try time.addDuration(now, self.auth_timeout);
             },
             .dhcp_lease => |lease| {
                 if (self.state != .waiting_dhcp) return error.InvalidState;
@@ -512,7 +527,7 @@ pub const Machine = struct {
         } });
         self.state = .protecting;
         self.protect_stage = .mschapv2;
-        self.deadline = try time.addDuration(now, .fromSeconds(30));
+        self.deadline = try time.addDuration(now, self.auth_timeout);
     }
 
     fn handleTimer(self: *Machine, now: std.Io.Timestamp, builder: *OutcomeBuilder) Error!void {
