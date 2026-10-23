@@ -17,13 +17,14 @@
 - 以研究报告记录协议分层、线格式、密码学构造、握手时序、心跳与失败边界。
 - 提供固定测试向量及可离线运行的 Zig 实例，使研究结论可被验证和独立复刻。
 - 802.1X/EAPOL 报文编解码与无副作用的认证状态转换。
-- 由调用方投递输入事件和当前时间的确定性驱动接口。
+- 由 client 投递输入事件和当前时间的确定性驱动接口。
 - 返回待发送报文、超时截止时间、状态变化和可区分错误。
 - EAP-MD5 路径，以及 PEAP 隧道内 EAP 与锐捷私有字段的编排。
 - 锐捷私有属性编解码及认证参数协商。
 - DHCP 结果处理、SAM/SMP 会话、心跳、重认证与下线的协议状态。
 - 直接通信分片、重组、完整性校验和重放窗口。
 - 对异常报文、超时、重试、取消和会话结束提供可区分的错误。
+- 交付 interface 中不保留语义未证明的 client 配置项；所有协议信息按管理原则在原定义位置分类。
 
 ## 复刻实例外部责任
 
@@ -84,7 +85,7 @@
 
 ## M2: 锐捷协议研究报告
 
-- 状态：已完成
+- 状态：已实施，交付完整性待收尾
 - 提交：`36e2693`
 
 ### 目标
@@ -104,12 +105,14 @@
 - 报告只记录协议结论、边界和复现向量。
 - 规范以 1.30、1.31 与 1.33 客户端为主要基线，并对 macOS 1.35 与 Windows 6.85 做结构级复核。
 - 部署差异和未命名字段明确保留为未知边界。
+- 所有协议信息必须按[协议文档管理原则](docs/rj-protocol/scope.md)归入六类，并在原定义章节就地标记；当前版本不实现或不再调查不构成删除理由。
 
 ### 验收
 
 - [x] 独立开发者无需本库代码即可理解核心报文格式。
 - [x] 每个私有算法具有固定输入向量。
 - [x] README 已索引报告入口。
+- [ ] 所有协议信息均具有六类分类，且字段、选项和调查记录保留在原始定义位置。
 
 ### 待验证
 
@@ -125,7 +128,7 @@
 
 ### 目标
 
-实现 EAPOL/EAP codec 和 EAP-MD5 `Session`，让调用方通过外部事件、时间和凭据驱动完整认证状态。
+实现 EAPOL/EAP codec 和 EAP-MD5 `Session`，让 client 通过外部事件、时间和凭据驱动完整认证状态。
 
 ### 交付内容
 
@@ -140,7 +143,7 @@
 - 公开入口是一个受控可变的 `Session`，认证、网络完成和直接通信是其内部正交子状态。
 - `Session` 不创建线程、定时器或网络资源，不接受回调 provider。
 - 绝对时间使用 `std.Io.Timestamp`，时长使用 `std.Io.Duration`。时间倒退返回明确错误。
-- `Session.init` 显式接收 allocator。`step` 返回拥有动作和报文字节的 `Outcome`，调用方通过 `Outcome.deinit` 释放。
+- `Session.init` 显式接收 allocator。`step` 返回拥有动作和报文字节的 `Outcome`，client 通过 `Outcome.deinit` 释放。
 - 分配失败不得提交部分状态；完整生成并校验本次结果后，才更新内部状态。
 - 输入使用统一事件联合，包含 `frame`、`timer`、`credentials` 和 `external_result`。异步输入携带当前尝试代次，借用字节不跨调用保存。
 - 凭据通过 `credentials` 事件按需提供。库不持久化密码，不调用凭据 provider。
@@ -158,7 +161,7 @@ pub fn step(
 ) Error!Outcome;
 ```
 
-`Outcome` 包含动作、`next_deadline` 和状态变化。调用方在截止时间到达时提交 `timer`，并根据返回动作完成实际发送、凭据收集或外部认证。
+`Outcome` 包含动作、`next_deadline` 和状态变化。client 在截止时间到达时提交 `timer`，并根据返回动作完成实际发送、凭据收集或外部认证。
 
 ### 验收
 
@@ -197,19 +200,19 @@ pub fn step(
 ### 已拍板决策
 
 - M4 保留完整范围：直接通信传输核心与 SAM/SMP 生命周期在同一个 spec 中建模，并通过垂直票据分批实施。
-- 重组器不拥有网络连接，所有输入帧由调用方提交。
+- 重组器不拥有网络连接，所有输入帧由 client 提交。
 - 分片和重组在密文上执行，完成重组后才解密。
 - 时间验证、长度验证和 authenticator 校验均在把载荷交给 SAM/SMP 解析器之前完成。
-- 会话 key、IV、timestamp 和分片缓冲由 `Session` 持有；对端网络生命周期由调用方负责。
-- 真实网络互操作由调用方的适配器测试完成，不属于本库进程。
+- 会话 key、IV、timestamp 和分片缓冲由 `Session` 持有；对端网络生命周期由 client 负责。
+- 真实网络互操作由 client adapter 测试完成，不属于本库进程。
 - `Session` 是协调者，只持有至多一个活动协议机；机器拥有自己的阶段、计数、deadline 和动态资源，并共享 allocator、source MAC、时间水位和代次 context。
 - 协议机通过只含 `step`、`nextDeadline` 和 `deinit` 的内部 vtable 接入；机器切换采用构造并验证完成后原子替换，失败保留旧机器。
 - 阶段对称命名为 `EapMd5Phase` 与 `DirectPhase`，公开为 `ActivePhase` tagged union；没有活动机器时进入 `.idle`。
 - `DirectPhase` 为 `initializing`、`awaiting_result`、`active`；内部 ACK、重发和解析状态不公开。
 - 新机器激活时递增代次；同一机器内部重发不递增；旁路协议帧返回状态不变的 no-op `Outcome`。
 - `Session` 显式拥有动态资源并提供 `deinit`；状态转换采用准备完成后再提交，不复制整个 `Session`。
-- 直接会话由已认证 EAP 状态上的显式 `direct_session` 事件启动，不能隐式从私有字段自动启动。
-- `DirectSessionConfig` 一次提交并复制生命周期所需内容，包含模式、端点、session ID、key/IV、时间戳模式、用户名、网络信息、SAM/SMP 参数和周期；最高版本仍是 adapter 侧的能力协商信息，输入切片不跨调用保存。
+- 原型阶段由已认证 EAP 状态上的显式 `direct_session` 事件启动；交付版本必须由 rj-connect 从服务器上下文、DHCP 结果和本机事实构造已知语义，不能把这些解释责任继续交给 client。
+- 原型 `DirectSessionConfig` 一次提交并复制生命周期所需内容；交付 interface 只保留来自部署 profile 或外部能力的必要值，并为每项记录用途、当前客户端来源和缺失行为。
 - Linux 1.31 的 `0x18` 是逐逻辑消息变化的 correlation ID，不是整场 Direct 固定 token；当前 `DirectSessionConfig.session_id` 仍是整场固定值，修正 API 语义前不得声称客户端等价。
 - `DirectSessionConfig` 使用公共字段 struct 加 `mode` union；SAM 与 SMP 的独有字段分别由命名 struct 完整包装，再对两个包装做 tagged union，不把每个字段建模成独立 optional。
 - 网络入口和发送动作统一使用完整 Ethernet II 帧，由 EtherType 分流；IPv4 固定 IHL 5、protocol 17、无 IP 分片，并严格校验长度与 checksum。
@@ -223,10 +226,10 @@ pub fn step(
 - 服务器时间模式按本地经过秒推进发送时间；单调模式每发送一个帧（包括重发）推进一次。
 - 片段通过校验并 ACK 后提交重放进度和追加内容；完整消息解密失败时释放重组缓冲，但保留 key、IV 和片段级重放进度。
 - 用户信息发送成功后等待 DHCP 认证结果 `9s`；SAM 与 SMP 结果输出为拥有所有权的 `direct_auth_result` 事件，服务器文本为 GBK 字节。
-- 直接结果拒绝、用户信息发送失败和结果超时都终止当前认证尝试；自动重试由调用方外层策略负责。
+- 直接结果拒绝、用户信息发送失败和结果超时都终止当前认证尝试；自动重试由 client 外层策略负责。
 - 取消和 Logoff 先幂等清理直接资源，再以一次可观察的终止结果回到 `.idle`；远端 Logoff 不重复发送。
-- 重认证只产生 `reauth_required` 并回到 `.idle`，不自动选择 EAP-MD5；下一次认证由调用方或 M5 显式启动。
-- 公开 API 显式使用 `username_gbk` 和 `server_message_gbk` 等 GBK 字节；字符集转换由调用方负责。
+- 重认证只产生 `reauth_required` 并回到 `.idle`，不自动选择 EAP-MD5；下一次认证由 client 或 M5 显式启动。
+- 公开 API 显式使用 `username_gbk` 和 `server_message_gbk` 等 GBK 字节；字符集转换由 client 负责。
 - 服务器下发的心跳、重认证、SMP hello、检测间隔和请求参数在 bootstrap 中标准化；零间隔禁用对应周期。
 - SAM 心跳发送无响应要求的握手消息；SMP 按 hello 间隔发送 `0x23`，等待业务响应，连续 3 次失败产生重认证请求；`0x80` flag 只保留观察值。
 - `protocol/sam.zig` 与 `protocol/smp.zig` 负责无生命周期业务 codec；`protocol/direct.zig` 只负责帧、header、authenticator 和分片线格式；不提供任意 direct payload 发送入口。
@@ -243,7 +246,7 @@ pub fn step(
 
 - 硬件信息、DHCP 第二认证和心跳字段的最小必需集合。
 - 目标服务器对直接通信最高版本和可选字段的组合要求。
-- Direct correlation ID 当前需要由库内部按逻辑消息递增，还是由 adapter 显式提供序列。
+- Direct correlation ID 需从原型固定 `session_id` 迁移为库内部按逻辑消息递增，并明确重认证后的重置行为。
 - 原客户端本地端口回退值 `80/8080` 与当前库默认值 `20000` 的兼容策略。
 - SAM `client_ipv4`/`client_mac` 和 SMP `host_disk_serial` 在公开 API 中的正式命名。
 
@@ -268,17 +271,17 @@ pub fn step(
 ### 已拍板决策
 
 - 库不实现 TLS 握手、证书验证或 MSCHAPv2 密码学交换。
-- TLS provider 通过不透明隧道字节与库交互，调用方负责证书和凭据策略。
+- TLS provider 通过不透明隧道字节与库交互，client 负责证书和凭据策略。
 - PEAP 编排仍由统一 `Session` 管理，不创建第二个公开生命周期。
 - 目标校园网的证书信任策略属于 adapter 配置，不进入协议状态。
 - M5 以当前校园网的有线 PEAP/MSCHAPv2 到 DHCP、SAM/SMP 的路径为验收主线；无线接入与未观察的 PEAP 变体只保留明确兼容边界。
 - 统一 `start` 不预先指定 EAP 方法。配置声明允许的方法集合，服务器选择实际方法，未配置或不支持的方法显式失败。
 - 库拥有 PEAP 外层与内层 EAP 编排；`tunnel_input` 把服务器 TLS 字节交给 adapter，`tunnel_output` 返回待封装 TLS 字节、可选内层 EAP 字节和处理状态，TLS session 与证书策略不进入库。
 - MSCHAPv2 provider 返回标准 EAP-MSCHAPv2 Response payload；库校验内层 EAP 外层、identifier 和结构，并在响应后追加锐捷紧凑字段。
-- PEAP V3 所需的应用数据与动态库数据由调用方提供，库在提交配置时复制；不读取客户端二进制或运行时文件。
+- PEAP V3 所需的应用数据与动态库数据由 client 按部署 profile 提供，库在提交配置时复制；不读取客户端二进制或运行时文件。
 - M5 的实现与验收范围为 PEAPv0 加 EAP-MSCHAPv2。PEAPv1/v2 和 cryptobinding 返回独立的 `UnsupportedPeapMode`，不得在没有 TLS 派生密钥的情况下伪装成功。
 - PEAP 成功且完整租约、服务器 Direct 参数和本地配置齐备后，同一 `Session` 自动切换到 Direct；缺少任何必需值时返回 `MissingDirectParameters`，不填猜测默认值。
-- Direct 的 `reauth_required` 只终止旧会话并回到 `idle`；下一轮认证仍由调用方显式提交 `start`。
+- Direct 的 `reauth_required` 只终止旧会话并回到 `idle`；下一轮认证仍由 client 显式提交 `start`。
 
 ### 验收
 
@@ -294,3 +297,29 @@ pub fn step(
 - `0x5f`、`0x60` 之外服务器可选字段的最小组合。
 - 真实 adapter 对 TLS 分片边界和内部 EAP 包大小的要求。
 - 无服务器 UTC、端口或其他可选字段时，PEAP Direct 应采用的原客户端本地回退值与平台 adapter 责任边界。
+
+## M6: 交付边界与协议完整性收口
+
+- 状态：未开始
+- 依赖：M2、M3、M4、M5
+
+### 目标
+
+把研究原型收敛为可交付 interface：所有支持分支的语义和输入来源完整，client 只提供运行事实、能力、部署 profile 和用户凭据。
+
+### 交付内容
+
+- 完成协议文档中原位标记的所有“存在，未调查”和“语义未证明”项的分类决策。
+- 每条协议信息必须落入：已证明事实、已证明的 client 输入、当前待调查、后续可选调查、非当前职责或存疑线索；分类保留在原定义位置。
+- 为每个 client 输入形成用途、格式、单位、生命周期、目标客户端来源和缺失行为说明。
+- 用 rj-connect 内部 profile/strategy 取代 client 对 Direct correlation ID、SAM/SMP 初始字段和本地回退值的语义决定。
+- 对未支持的协议分支提供明确拒绝，不增加占位配置项。
+- 将 README、ROADMAP、CHANGELOG 和协议文档同步到交付状态。
+
+### 验收
+
+- [ ] 公开 interface 中不存在语义未证明的可选配置。
+- [ ] 每个 client 提供的值都有用途和当前目标客户端取值说明。
+- [ ] 所有已见字段、协议分支和调研线索均在其原始章节具有六类标记及实现/交付状态。
+- [ ] 目标 profile 的兼容假设、证据范围和退出边界明确。
+- [ ] 支持分支通过正常、非法输入、缺失值、超时和错误映射测试。

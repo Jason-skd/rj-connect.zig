@@ -11,6 +11,8 @@ plan: "index.md#文档计划"
 
 EAP-MD5 至少存在两种已观察响应：标准口令证明和锐捷私有用户名证明。它们不能共用同一个 encoder。
 
+本页未标记的报文布局和固定向量属于[第 1 类已证明事实](scope.md#信息分类)。身份与凭据属于第 2 类 client 输入。
+
 ## 以太网与 EAPOL 外层
 
 认证帧是以太网 II 帧，EtherType 为大端 `0x888E`。标准目的地址为 `01:80:C2:00:00:03`，锐捷 NAS 模式可使用服务器返回的地址。
@@ -27,6 +29,16 @@ EAP-MD5 至少存在两种已观察响应：标准口令证明和锐捷私有用
 
 Start 与 Logoff 的 body length 为零。EAP packet type 的线上值为 `0`，不是表格中常用的“类型 0”概念。
 
+### Client 输入：接收帧
+
+| 信息             | 布局                                     |
+| ---------------- | ---------------------------------------- |
+| 接收 Ethernet 帧 | 从 Ethernet II 目的 MAC 开始的完整帧字节 |
+
+用途：推进 EAPOL Start、Request、Success、Failure 和 Logoff 状态，并按 EtherType 与 EAP type 分派。
+
+client 获取方式：从认证网卡抓包或链路层 socket 读取完整帧，保留原始长度和有效字节，不裁剪 Ethernet 头。
+
 ## EAP 帧
 
 EAP body 从 EAPOL 偏移 `0x12` 开始。
@@ -41,20 +53,43 @@ EAP body 从 EAPOL 偏移 `0x12` 开始。
 
 响应必须复用对应请求的 identifier。未知服务器 identifier 的响应应当丢弃，避免旧请求覆盖当前交换。
 
+### Client 输入：身份与凭据
+
+| 信息             | 布局                                                |
+| ---------------- | --------------------------------------------------- |
+| `username_bytes` | EAP Identity 和锐捷私有 MD5 证明使用的原始用户名    |
+| `password_bytes` | 标准 EAP-MD5 口令证明和锐捷私有口令链使用的原始密码 |
+
+#### `username_bytes`
+
+用途：作为 Identity Response 的正文、锐捷私有 MD5 证明的输入，以及后续 SAM/SMP 业务消息的用户身份。
+
+client 获取方式：取得用户提供的账户名，按目标协议字段要求转换为 GBK 字节；调用期间传给 rj-connect，不持久化。
+
+#### `password_bytes`
+
+用途：参与标准 EAP-MD5 证明，或参与锐捷私有的用户名链式口令加密。PEAP/MSCHAPv2 的密码学语义由 provider 处理。
+
+client 获取方式：从用户秘密输入或 client 自有凭据存储取得，转换为本分支要求的 GBK 字节。命令行、环境、交互和存储策略由 client 决定。
+
+> TODO（当前版本待调查）：目标学校客户端选择标准 EAP-MD5 还是锐捷私有 EAP-MD5。选择应形成具名部署 profile，不能由 client 在报文层自行决定。
+
 ## 请求与响应分派
 
 服务器 Request 按 EAP type 分派，客户端响应如下：
 
-| 服务器 Request               | 客户端动作                             |
-| ---------------------------- | -------------------------------------- |
-| Identity，type `1`           | 返回 Identity Response                 |
-| Notification，type `2`       | 回报 Notification Response，正文可为空 |
-| Legacy NAK，type `3`         | 返回 NAK Response                      |
+| 服务器 Request               | 客户端动作                                |
+| ---------------------------- | ----------------------------------------- |
+| Identity，type `1`           | 返回 Identity Response                    |
+| Notification，type `2`       | 回报 Notification Response，正文可为空    |
+| Legacy NAK，type `3`         | 返回 NAK Response                         |
 | MD5-Challenge，type `4`      | 按部署分支计算标准或锐捷私有 MD5 Response |
-| OTP，type `5`                | 返回 NAK Response                      |
-| Generic Token Card，type `6` | 返回 NAK Response                      |
-| Credential，type `7`         | 返回用户名和口令字节                   |
-| PEAP，type `25`              | 建立 PEAP/TLS 隧道并按内层方法认证     |
+| OTP，type `5`                | 返回 NAK Response                         |
+| Generic Token Card，type `6` | 返回 NAK Response                         |
+| Credential，type `7`         | 返回用户名和口令字节                      |
+| PEAP，type `25`              | 建立 PEAP/TLS 隧道并按内层方法认证        |
+
+> TODO（后续版本可选补齐调查）：EAP-TLS、EAP-TTLS、EAP-GTC、LEAP 和 OTP 等内嵌认证方法。
 
 服务器 `Success` code `3` 表示 EAP 方法成功，`Failure` code `4` 表示方法失败。它们不是 EAP Request。
 
@@ -95,6 +130,8 @@ proof = MD5(id:u8 || password_bytes || challenge[16])
 ```
 
 首个字节是值长度 `16`，随后是 16 字节原始摘要，不转换成十六进制文本，也不附加用户名。MentoHUST 的 `checkPass` 走这一分支；Linux 1.31 内嵌的 wpa_supplicant 也保留这一标准路径。
+
+> 当前 Zig 代码暂不实施：标准 EAP-MD5 profile。现有确定性 `Session` 只实现锐捷私有用户名证明。
 
 ## 锐捷私有 EAP-MD5 响应
 

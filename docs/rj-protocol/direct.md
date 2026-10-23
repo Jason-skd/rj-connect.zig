@@ -11,6 +11,8 @@ plan: "index.md#文档计划"
 
 Linux 1.31 的静态证据还区分了“逻辑消息关联 ID”和“片段 ID”。厂商代码沿用 `dwSessionID` 来称呼前者，但它不是整场 Direct 生命周期的固定值，不能据此把所有消息绑定到同一个 ID。
 
+本页未标记的帧层次、头字段、TLV、分片和密码学属于[第 1 类已证明事实](scope.md#信息分类)。Direct 所需的 DHCP、本机网络事实和硬件信息属于第 2 类 client 输入。
+
 ## 帧层次
 
 直接通信帧的层次为：
@@ -29,18 +31,20 @@ IPv4 total length 等于 `28 + 42 + len(encrypted_chunk)`。UDP length 等于 `8
 
 所有整数使用大端序。
 
-| 偏移   | 长度 | 字段          | 规则                         |
-| ------ | ---- | ------------- | ---------------------------- |
-| `0x00` | 1    | version       | 固定 `1`                     |
-| `0x01` | 1    | code          | `1=data`，`2=response`       |
-| `0x02` | 4    | fragment ID   | 同一发送上下文内逐片段递增   |
-| `0x06` | 2    | packet length | `42 + len(encrypted_chunk)`  |
-| `0x08` | 16   | authenticator | 见完整性校验                 |
-| `0x18` | 4    | correlation ID | 逻辑消息关联值              |
-| `0x1c` | 8    | timestamp     | 秒为单位的单调值或服务器时间 |
-| `0x24` | 1    | message type  | 样本数据消息为 `1`           |
-| `0x25` | 1    | flags         | 分片位置                     |
-| `0x26` | 4    | total length  | 完整加密载荷长度             |
+| 偏移   | 长度 | 字段           | 规则                         |
+| ------ | ---- | -------------- | ---------------------------- |
+| `0x00` | 1    | version        | 固定 `1`                     |
+| `0x01` | 1    | code           | `1=data`，`2=response`       |
+| `0x02` | 4    | fragment ID    | 同一发送上下文内逐片段递增   |
+| `0x06` | 2    | packet length  | `42 + len(encrypted_chunk)`  |
+| `0x08` | 16   | authenticator  | 见完整性校验                 |
+| `0x18` | 4    | correlation ID | 逻辑消息关联值               |
+| `0x1c` | 8    | timestamp      | 秒为单位的单调值或服务器时间 |
+| `0x24` | 1    | message type   | 样本数据消息为 `1`           |
+| `0x25` | 1    | flags          | 分片位置                     |
+| `0x26` | 4    | total length   | 完整加密载荷长度             |
+
+> TODO（后续版本可选补齐调查）：Direct version 2 的线格式、能力协商和状态差异。
 
 `packet length` 必须等于当前 UDP 载荷减去 8 字节 UDP 头。`total length` 覆盖全部片段重组后的完整 DES-CBC 密文。
 
@@ -54,6 +58,8 @@ Linux 1.31 的 `CDirTranThread` 构造时把两个独立计数器初始化为 `1
 同一片段的超时重发保留原 fragment ID、correlation ID、flags、密文、total length、session 参数和端点。一次建立新的 Direct 发送线程后，计数器重新从 `1` 开始。
 
 原始客户端的 correlation ID 按逻辑消息变化，接收索引不能把它当成整场连接永远不变的 token。实现可以把该字段命名为 `session_id`，但必须明确其实际作用域。
+
+> TODO（当前版本待调查）：当前原型以固定 `DirectSessionConfig.session_id` 发送所有消息，尚未迁移为逻辑消息递增策略。
 
 ## 分片标志
 
@@ -143,16 +149,16 @@ authenticator = MD5(hash_input)
 
 每条直接会话至少保存：
 
-| 参数            | 用途                     |
-| --------------- | ------------------------ |
-| peer IPv4       | 接收与发送端点           |
-| peer UDP port   | 接收与发送端点           |
-| local UDP port  | response 匹配            |
-| correlation ID  | 请求、响应和重组索引     |
-| DES key         | 载荷加密与 authenticator |
-| initial IV      | 每次消息加密的起点       |
-| timestamp state | 防重放                   |
-| next fragment ID | 分片编号                |
+| 参数             | 用途                     |
+| ---------------- | ------------------------ |
+| peer IPv4        | 接收与发送端点           |
+| peer UDP port    | 接收与发送端点           |
+| local UDP port   | response 匹配            |
+| correlation ID   | 请求、响应和重组索引     |
+| DES key          | 载荷加密与 authenticator |
+| initial IV       | 每次消息加密的起点       |
+| timestamp state  | 防重放                   |
+| next fragment ID | 分片编号                 |
 
 收到来自其他地址、端口或 correlation ID 的数据时，不得复用当前密钥或重组缓冲。
 
@@ -168,6 +174,43 @@ SAM 的业务载荷使用单字节 `type` 和单字节 `length`。最小握手�
 ```
 
 `01 01 02` 是握手前缀，最后字节 `02` 为握手码。后续字段使用单字节长度 TLV。Linux 1.31 从 DHCP 结果取 `client_ipv4`，从认证适配器取 `client_mac`。两者在 Direct 初始化时确定，不是随机会话参数。
+
+> TODO（当前版本待调查）：把原型 `SamConfig.session_parameter` 与 `endpoint_parameter` 迁移为本机 IPv4 和认证网卡 MAC 的明确字段。
+
+### Client 输入：SAM/SMP 初始身份
+
+| 信息               | 布局                                   |
+| ------------------ | -------------------------------------- |
+| `client_ipv4`      | SAM TLV `0x04` 的 4 字节本机 IPv4 地址 |
+| `client_mac`       | SAM TLV `0x05` 的 6 字节认证网卡 MAC   |
+| `host_disk_serial` | SMP hello TLV `0x03` 的变长硬盘序列号  |
+| `username_gbk`     | SAM/SMP 用户身份 TLV 的 GBK 字节       |
+
+#### `client_ipv4`
+
+用途：标识参与本次 Direct 会话的本机 IPv4 地址。
+
+client 获取方式：从当前认证网卡已经取得的 DHCP 租约或等价系统网络接口状态读取 IPv4 地址，并以网络字节序传入。
+
+#### `client_mac`
+
+用途：标识实际执行 802.1X 认证的网卡。
+
+client 获取方式：从所选网络接口读取硬件地址，确保它与其他 EAPOL/Direct 帧使用的源 MAC 一致。
+
+#### `host_disk_serial`
+
+用途：在 SMP hello 中向服务器提供目标客户端使用的主机磁盘标识。
+
+client 获取方式：从所选系统盘的稳定标识读取。Linux 1.31 客户端提供 `getdiskid` 实现；目标客户端对前缀、长度和字符过滤的精确规则仍按下文 TODO 调查。
+
+> TODO（当前版本待调查）：Linux 1.31 的 `getdiskid` 在目标系统上如何生成长度、前缀和字符；macOS 1.35 与 Windows 6.85 是否使用同一规则。
+
+#### `username_gbk`
+
+用途：作为 SAM/SMP 业务身份，与 EAP 阶段使用的账户对应。
+
+client 获取方式：取得用户账户名，按目标协议字段要求转换为 GBK 字节后传给 rj-connect；原客户端的长度上限仍需按部署 profile 校验。
 
 SAM 用户信息消息以 `01 01 08` 开头，随后使用 TLV：
 
@@ -201,13 +244,15 @@ SMP direct payload 以 4 字节固定头开始：
 
 核心命令如下：
 
-| Command | 名称        | TLV                                |
-| ------- | ----------- | ---------------------------------- |
-| `0x23`  | hello       | `0x02` 用户名，`0x03` 硬盘序列号   |
-| `0x2d`  | user info   | 用户名和地址信息                   |
-| `0x2e`  | DHCP result | `0xce` 成功标志，`0xcf` 消息       |
+| Command | 名称        | TLV                              |
+| ------- | ----------- | -------------------------------- |
+| `0x23`  | hello       | `0x02` 用户名，`0x03` 硬盘序列号 |
+| `0x2d`  | user info   | 用户名和地址信息                 |
+| `0x2e`  | DHCP result | `0xce` 成功标志，`0xcf` 消息     |
 
 SMP 的 `0x03` 与 SAM 的 `0x04` 不同：Linux 1.31 从 `tagSmpParaDir.HDSerialNO` 读取硬盘序列号。现有 Zig 公共类型中的 `session_parameter` 是旧占位名，不能据此推断字段来源。
+
+> TODO（当前版本待调查）：把原型 `SmpConfig.session_parameter` 迁移为明确的主机硬盘序列号字段。
 
 SMP user info 的核心地址字段为：
 
@@ -222,6 +267,8 @@ SMP user info 的核心地址字段为：
 | `0xd3` | 备用 DNS      |
 
 DHCP result 的 `0xce` 长度固定为 1。`0xcf` 为 GBK 文本，可以为空。
+
+> TODO（后续版本可选补齐调查）：SAM/SMP 的 ACL、密码修改、主机信息和服务切换等辅助业务消息。
 
 SMP hello 连续失败 3 次时，会话返回重连流程。持续失败最终进入 held 或 logoff，不得在旧 key 上继续发送心跳。
 
@@ -240,8 +287,16 @@ Linux 1.31 在服务器未提供 Direct 端点参数时使用：
 | 对端 Direct 端口 | `8080`     | `0x5a`         |
 | 本地 Direct 端口 | `80`       | `0x6e`         |
 
-SMP 路径还会对本地端口创建 UDP bind；确定性库本身只生成完整帧，监听、绑定或等价过滤由 adapter 负责。
+SMP 路径还会对本地端口创建 UDP bind；确定性库本身只生成完整帧，监听、绑定或等价过滤由 client adapter 负责。
 
-服务器 UTC 字段 `0x5e` 非零时，发送时间戳使用服务器时间锚点。缺失或为零时，Linux 1.31 使用本地单调发送序列；该状态的记录从零开始，`GetNextTimeStampForSend` 返回下一个值。macOS 1.35 和 Windows 6.85 是否保持相同回退初值仍需样本级验证。
+> 当前 Zig 代码暂不实施：UDP socket 创建、绑定和收包。client 提交完整 Ethernet 帧。
 
-当前 rj-connect 要求调用方在无服务器 UTC 时显式提供单调起点，这是确定性库边界；`local_udp_port = 20000` 则是当前库的默认策略，不是 Linux 1.31 客户端默认值。
+服务器 UTC 字段 `0x5e` 非零时，发送时间戳使用服务器时间锚点。缺失或为零时，Linux 1.31 使用本地单调发送序列；该状态的记录从零开始，`GetNextTimeStampForSend` 返回下一个值。
+
+> TODO（当前版本待调查）：macOS 1.35 和 Windows 6.85 是否保持相同的 Direct 计数起点、端口回退和时间戳初值。
+
+> 存疑线索：根据 Linux 1.31 的零值初始化和递增路径，本地单调模式首个发送时间戳可能是 `1`；当前尚未通过动态观察或固定报文确认。
+
+当前 rj-connect 要求 client 在无服务器 UTC 时显式提供单调起点；`local_udp_port = 20000` 则是当前库的原型默认策略，不是 Linux 1.31 客户端默认值。
+
+> TODO（当前版本待调查）：把本地端口、时间戳起点和 Direct 兼容行为收口为 rj-connect 内部具名 profile，消除原型中的 client 语义配置。
