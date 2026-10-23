@@ -1,5 +1,34 @@
 # Changelog
 
+## v.0.1.0
+
+### Changed
+
+- 项目定位为锐捷校园网认证协议技术研究仓库，核心成果是完整研究报告，用于学习加密、多次握手和通过心跳维持认证状态的工程方法。
+- Zig 代码作为研究成果的一次实例复刻，提供确定性协议编排和离线验证；README 优先引导阅读报告与认证流程图。
+- Zig 包版本更新为 `0.1.0`，Git tag 为 `v.0.1.0`。打包清单包含完整报告、流程图、源码及 README 索引的配套文档。
+
+### Fixed
+
+- PEAP 进入 DHCP 等待后，重复的外层 Success 返回 `DuplicateFrame`，保持原有轮询进度和截止时间。
+- Direct 服务器明确拒绝认证时，即使消息为空，也返回 `direct_result_rejected`；等待结果超时仍返回 `direct_result_timeout`。
+
+### Usage
+
+- 从 `docs/rj-protocol/index.md` 阅读研究报告，结合 `flow_chart.svg`、各协议章节与固定测试向量理解认证流程。
+- Zig 复刻通过包模块 `rj-connect` 导入。`protocol` 提供无生命周期的 codec，`session.Session` 是统一生命周期入口，`Session.phase()` 暴露 `idle`、EAP-MD5、PEAP 和 Direct 阶段。
+- 启用 PEAP 时，在 `Config` 中允许 `peap` 并提供 `PeapConfig`。V3 应用数据与动态库数据、Direct session ID、SAM/SMP 参数和无法由服务器推导的本地参数由调用方提供。
+- PEAP 使用 `tunnel_input` 将 TLS 字节交给 adapter，adapter 通过 `tunnel_output` 返回待发送 TLS、可选内层 EAP 和 TLS 状态；MSCHAPv2 通过 `authenticate_mschapv2` 和 `verify_mschapv2` 动作交给外部实现。
+- PEAP 成功、完整 DHCP 租约与服务器和本地参数齐备后自动进入 Direct；租约需含 IP、掩码、网关和 DNS，缺少 Direct 必需参数时返回 `MissingDirectParameters`。EAP-MD5 路径通过 `direct_session` 显式提交 `DirectSessionConfig`。
+- `Outcome` 拥有发送帧、隧道输入、MSCHAPv2 请求和服务器文本；消费动作后使用初始化 Session 的 allocator 调用 `Outcome.deinit`。`Session.deinit` 释放活动协议机及跨调用资源。
+- 帧、定时器、隧道输出与外部结果携带当前 `Generation`；旧代次返回 `StaleGeneration`。调用方提交当前时间并按返回的 deadline 驱动定时器。
+
+### Limits
+
+- 研究范围主要为锐捷 1.30、1.31 与 1.33 的有线认证协议族；完整跨版本兼容性、部署所需可选字段及 IPv6 部分字段语义仍有待验证。
+- Zig 复刻支持 PEAPv0 与隧道内 EAP-MSCHAPv2 编排；PEAPv1/v2 和 cryptobinding 返回 `UnsupportedPeapMode`，Direct 限于 IPv4、IHL 5、无 IP 分片和 direct version 1。
+- 网络 I/O、时钟、随机数、凭据、DHCP 系统操作、TLS、证书验证与 MSCHAPv2 计算属于外部适配。离线测试不证明真实校园网互操作。
+
 ## 368a85a
 
 ### Added
