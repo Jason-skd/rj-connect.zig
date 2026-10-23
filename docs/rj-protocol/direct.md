@@ -59,7 +59,9 @@ Linux 1.31 的 `CDirTranThread` 构造时把两个独立计数器初始化为 `1
 
 原始客户端的 correlation ID 按逻辑消息变化，接收索引不能把它当成整场连接永远不变的 token。实现可以把该字段命名为 `session_id`，但必须明确其实际作用域。
 
-Linux 1.31 与 macOS 1.35 的静态调查均确认两个计数器从 `1` 初始化：macOS 的 fragment ID 和 correlation ID 分别位于 `CDirTranThread + 0x688` 和 `+0x6a8`，片段发送和逻辑消息发送路径分别递增。当前 Zig 原型仍通过固定 `DirectSessionConfig.session_id` 发送所有消息，这是待修正的实现差异，不是未决协议语义。
+macOS 1.35 的 fragment ID 和 correlation ID 分别位于 `CDirTranThread + 0x688` 和 `+0x6a8`，片段发送和逻辑消息发送路径分别递增。Windows 6.85 的 `CDirTranThread` 构造（`0x4a56d0`）同样把 fragment ID `+0x6c4` 和 correlation ID `+0x14cc` 初始化为 `1`；发送路径都是先取当前值，再递增。
+
+三平台因此在计数语义上一致：新 Direct 发送上下文从 `1` 开始，每个新片段取得新的 fragment ID，每条新逻辑消息取得新的 correlation ID。当前 Zig 原型仍通过固定 `DirectSessionConfig.session_id` 发送所有消息，这是待修正的实现差异，不是未决协议语义。
 
 ## 分片标志
 
@@ -214,9 +216,13 @@ Linux 1.31 的 `getdiskid` 静态实现已经还原：
 
 macOS 1.35 不使用该 Linux 路径。它在应用启动时调用 `/usr/sbin/system_profiler` 的 `SPSerialATADataType`，解析 `Serial Number` 字段，删除空格和换行，并同样限制为 64 字节。
 
-Windows 6.85 的具体串号生成实现仍需核对其 SCSI/系统盘接口；不能根据符号存在推断与 Linux 或 macOS 相同。
+Windows 6.85 的 wrapper（`0x4c4680`）只接受磁盘索引 `0..3`。对每个候选索引依次尝试：
 
-> TODO（当前版本待调查）：确认 Windows 6.85 的硬盘串号发现、清理和长度限制规则。
+1. 系统卷或设备信息路径，IOCTL `0x560000`。
+2. `\\.\PhysicalDrive%d`，IOCTL `0x7c088`。
+3. `\\.\Scsi%d` 配合 `SCSIDISK`，IOCTL `0x4d008`。
+
+任一设备信息读取成功后，`0x4c4d10` 从 Identify 串号字段取 10 个 16 位单元，按 SATA/ATA 的字序展开为最多 20 个 ASCII 字节，删除所有 `0x20` 空格。字段 `0x54` 的外层上限仍为 64 字节，因此 Windows 当前实现的有效串号上限是 20 字节。
 
 #### `username_gbk`
 
@@ -303,13 +309,11 @@ SMP 路径还会对本地端口创建 UDP bind；确定性库本身只生成完�
 
 > 当前 Zig 代码暂不实施：UDP socket 创建、绑定和收包。client 提交完整 Ethernet 帧。
 
-服务器 UTC 字段 `0x5e` 非零时，发送时间戳使用服务器时间锚点。缺失或为零时，Linux 1.31 使用本地单调发送序列；该状态的记录从零开始，`GetNextTimeStampForSend` 返回下一个值。
+服务器 UTC 字段 `0x5e` 非零时，发送时间戳使用服务器时间锚点。缺失或为零时，Linux 1.31 使用本地单调发送序列；该状态的记录从零开始，`GetNextTimeStampForSend` 返回下一个值，因此已有记录上的首个发送值为 `1`。
 
 Linux 1.31 和 macOS 1.35 的 Direct fragment/correlation 计数器都从 `1` 开始。macOS 1.35 与 Windows 6.85 的 Direct 参数构造都设置对端端口 `8080`、本地端口 `80`；Windows 还设置片段 ACK 等待 `3000 ms` 和三次发送尝试。
 
-> TODO（当前版本待调查）：确认 Windows 6.85 的 Direct fragment/correlation 初值和无服务器 UTC 时的时间戳初值。
-
-> 存疑线索：根据 Linux 1.31 的零值初始化和递增路径，本地单调模式首个发送时间戳可能是 `1`；当前尚未通过动态观察或固定报文确认。
+Windows 6.85 的 `CDirTranThread` 构造先把时间戳管理器指针 `+0x14c8` 清零；Direct 初始化随后调用 `0x55f640` 创建管理器，其时间戳表初始为空。取下一发送时间戳的路径（`0x5635e0`）按目标键查找记录；记录不存在时返回 `0`，存在时把记录中的 64 位值加一并返回。因此 Windows 的全新发送上下文在时间戳表仍为空时，首个发送时间戳是 `0`，不是 Linux 路径的 `1`。服务器时间或对端记录的写入会改变后续值。
 
 当前 rj-connect 要求 client 在无服务器 UTC 时显式提供单调起点；`local_udp_port = 20000` 则是当前库的原型默认策略，不是 Linux 1.31 客户端默认值。
 

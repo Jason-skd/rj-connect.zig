@@ -74,7 +74,17 @@ client 获取方式：从用户秘密输入或 client 自有凭据存储取得�
 
 Linux 1.31 同时保留标准 EAP-MD5 和锐捷私有 EAP-MD5：标准路径来自内嵌 wpa_supplicant，私有路径由 `CStateMachineThread::txRspAuth` 构造。客户端“包含某条实现”不能证明目标学校实际选择该路径。
 
-> TODO（当前版本待调查）：确认目标学校实际部署请求并使用的 EAP 路径，形成具名部署 profile；不能由 client 在报文层自行切换。
+Linux 1.31 的 `SET_EAP_TYPE()` 和 Windows 6.85 使用相同的 `AuthMode` 字符串映射：
+
+| `AuthMode`    | EAP type |
+| ------------- | -------- |
+| `EAPMD5`      | `4`      |
+| `EAPWIRELESS` | `25`     |
+| `EAPTLS`      | `13`     |
+
+Windows 还分别读取 `support_md5`、`support_peap`、`support_tls_wired` 和 `support_tls_wireless`。启动认证时优先使用当前选中的 PEAP 方法；否则若当前方法为 EAP-TLS 则使用 type `13`；其余情况回退 PEAP。当前主路径没有把 `Support=5` 统一解释为 EAP type 位图；实际方法由具名 `AuthMode` 和 profile 字段决定。静态证据因此能确定支持矩阵、配置字段和客户端选择顺序，不能确定目标学校选择了哪个 `AuthMode`，也不能确定服务器实际回应哪条方法。
+
+> TODO（当前版本待调查）：目标学校实际使用的 EAP 路径只能通过认证交换确认；客户端构建绑定与部署配置必须形成具名 profile，不能由 client 在报文层自行切换。
 
 ## 请求与响应分派
 

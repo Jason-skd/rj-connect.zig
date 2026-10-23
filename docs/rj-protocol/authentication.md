@@ -169,7 +169,9 @@ client 获取方式：由 client 的 TLS engine 处理服务器 TLS 字节、产
 
 客户端应验证的服务器身份来源可以静态来自部署 profile，但真实校园网使用的 DNS 名称、IP、证书链、公钥指纹和协商 TLS 版本只能从实际 TLS 握手确认。
 
-> TODO（当前版本待调查）：通过目标认证握手确认服务器身份校验策略和最低 TLS 版本。
+Linux 1.31 的构建事实已经确认：`tls_init` 使用 `TLSv1_method()` 创建 SSL context，并支持 `ca_cert`、`ca_path` 与连接级证书验证回调。该证据证明客户端库具备 TLS 1.0 系列协议能力和 CA 链验证入口，不证明目标服务器实际提供的证书、主机身份字段或最终协商版本。
+
+> TODO（当前版本待调查）：静态边界已确认；仍需通过目标认证握手记录服务器证书链、身份字段、指纹和实际协商 TLS 版本，形成目标部署 profile。
 
 ### Client 输入：MSCHAPv2
 
@@ -186,7 +188,9 @@ Linux 1.31 内嵌 wpa_supplicant 的 `nt_password_hash` 已静态确认：输入
 
 因此中文密码的结果完全取决于 upstream 传入的字节编码；UTF-8 或 GBK 多字节序列都会被逐字节当成独立 UTF-16 code unit。
 
-> TODO（当前版本待调查）：确认 macOS 1.35 与 Windows 6.85 的 MSCHAPv2/EAPHost provider 是否采用相同规则。
+macOS 1.35 主程序只表明 PEAP 依赖系统 Security/CoreWLAN 能力，未内嵌 `nt_password_hash` 或 MSCHAPv2 provider 实现。Windows 6.85 的 `SuEapPeerPeap32.dll`/`SuEapPeerPeap64.dll` 是 EAPHost 接口壳，通过命名管道与 PEAP provider 通信，并引用 `SuEapPeap.dll`；该实现 DLL 不在现有制品中。因此不能把 Linux 的逐字节规则外推到这两个平台。
+
+> TODO（当前版本待调查）：macOS 与 Windows 的密码转换位于当前静态制品边界之外；Windows 需取得 `SuEapPeap.dll`，两个平台最终都应在认证期用中文密码验证字符集、规范化和 UTF-16LE 结果。
 
 确定性实现不应自行猜测缺失的服务器值。可由服务器字段、DHCP 结果和本机适配器权威导出的值应在协议层组合；时间起点、是否真实绑定本地端口、TLS 证书策略和平台 I/O 仍由 client adapter 提供。
 
@@ -201,7 +205,9 @@ Direct 构造输入应按下述所有权收口：
 
 Linux 1.31、macOS 1.35 和 Windows 6.85 的 Direct 端口回退均为对端 `8080`、本地 `80`。Linux 在服务器 UTC 缺失时使用本地单调时间模式。
 
-> TODO（当前版本待调查）：确认 PEAP 路径其他可选 Direct 字段缺失时的目标客户端回退值，以及 Windows 时间戳初值。
+Windows 6.85 的 Direct 时间戳管理器创建时使用空表；空表查询返回 `0`，已有记录首次递增后的值为 `1`。其 `0x55` 编码器固定返回空值，`0x64` 只在 IPD 客户端检测状态成立时发送固定 `00 01`，其他字段的生成条件已按平台记录在[私有字段布局](private-fields.md)。这些静态结论仍不等于目标服务器要求的最小字段集合。
+
+> TODO（当前版本待调查）：PEAP 路径各字段的客户端回退值已静态定位；仍需通过目标认证交换确认服务器实际下发和接受的可选 Direct 字段集合。
 
 > 当前 Zig 代码暂不实施：TLS 握手、证书验证、证书读取和 socket 生命周期。client 提交 TLS 字节、建立状态及验证结果。
 
