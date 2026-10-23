@@ -50,6 +50,10 @@ _Avoid_: 客户端安装路径、运行时文件读取
 PEAP 完成且租约和直接会话参数齐备后，同一 `Session` 从 PEAP 阶段转入 Direct 阶段的一次转换。
 _Avoid_: 第二会话、隐式默认配置
 
+**PEAP Direct 本地回退值**：
+服务器未提供 UTC、本地端口或其他可选 Direct 参数时，由客户端策略或 adapter 提供的本地值。
+_Avoid_: 协议固定默认值、任意猜测值
+
 ## 直接通信
 
 **直接帧**：
@@ -57,8 +61,16 @@ _Avoid_: 第二会话、隐式默认配置
 _Avoid_: UDP 载荷、原始消息
 
 **直接会话**：
-绑定本地与对端端点、session ID、密钥和时间戳状态的一次 SAM 或 SMP 通信生命周期。
+绑定本地与对端端点、密钥和时间戳状态的一次 SAM 或 SMP 通信生命周期。
 _Avoid_: 直接连接、网络会话
+
+**Direct correlation ID**：
+42 字节头字段 `0x18` 的逐逻辑消息关联值；请求的响应回显该值，同一消息的所有片段共用它。
+_Avoid_: 固定会话 token、片段 ID
+
+**Direct fragment ID**：
+42 字节头字段 `0x02` 的片段编号，在一个发送上下文内逐片段递增。
+_Avoid_: correlation ID、SAM 会话参数
 
 **direct payload**：
 完成重组和解密后可交给 SAM 或 SMP 解析的业务字节。
@@ -71,6 +83,14 @@ _Avoid_: direct payload、消息
 **SMP 初始化**：
 在直接会话建立后获取服务器 SMP 运行参数的握手阶段。
 _Avoid_: 心跳、hello
+
+**SAM 客户端参数**：
+SAM 初始 TLV `0x04` 的本机 IPv4 和 `0x05` 的本机 MAC。
+_Avoid_: 随机 session parameter、远程端点
+
+**SMP hello 主机序列号**：
+SMP 初始 TLV `0x03` 携带的硬盘序列号。
+_Avoid_: 本机 IPv4、通用 session parameter
 
 **直接认证结果**：
 服务器通过 SAM 或 SMP 返回、并归一化后的用户网络认证结果。

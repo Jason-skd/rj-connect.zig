@@ -102,7 +102,7 @@
 ### 已拍板决策
 
 - 报告只记录协议结论、边界和复现向量。
-- 规范覆盖 1.30、1.31 与 1.33 客户端的共同协议族。
+- 规范以 1.30、1.31 与 1.33 客户端为主要基线，并对 macOS 1.35 与 Windows 6.85 做结构级复核。
 - 部署差异和未命名字段明确保留为未知边界。
 
 ### 验收
@@ -113,8 +113,9 @@
 
 ### 待验证
 
-- 1.30、1.31 与 1.33 之间私有字段的完整兼容范围。
+- 1.30 至 1.35 以及 Windows 6.85 之间私有字段和状态字段的完整兼容范围。
 - 四个 IPv6 槽位的业务语义。
+- V3 输入材料与具体客户端构建、学校部署配置之间的对应关系。
 
 ## M3: EAP-MD5 确定性协议引擎
 
@@ -172,6 +173,7 @@ pub fn step(
 
 - 目标校园网实际启用的 EAP 方法和服务器能力。
 - 真实服务器对 EAP-MD5 字段最小集合的要求。
+- 目标部署使用标准 EAP-MD5 口令证明还是锐捷私有用户名证明；当前复刻只实现后者。
 
 ## M4: 直接通信分片与重组
 
@@ -185,10 +187,10 @@ pub fn step(
 
 ### 交付内容
 
-- 42 字节 direct header 与 message ID 序列。
+- 42 字节 direct header、逐片段 fragment ID 和逐逻辑消息 correlation ID。
 - flags `1/2/3/4` 对应的单片、首片、中间片和末片语义。
 - 1358 字节分片边界与重发动作。
-- 按 peer、端口和 session ID 隔离的重组缓冲。
+- 按 peer、端口和 correlation ID 隔离的重组缓冲。
 - DES-CBC 加解密、MD5 authenticator 和时间戳窗口。
 - SAM/SMP 握手、DHCP 认证结果、心跳和重认证状态。
 
@@ -208,12 +210,13 @@ pub fn step(
 - `Session` 显式拥有动态资源并提供 `deinit`；状态转换采用准备完成后再提交，不复制整个 `Session`。
 - 直接会话由已认证 EAP 状态上的显式 `direct_session` 事件启动，不能隐式从私有字段自动启动。
 - `DirectSessionConfig` 一次提交并复制生命周期所需内容，包含模式、端点、session ID、key/IV、时间戳模式、用户名、网络信息、SAM/SMP 参数和周期；最高版本仍是 adapter 侧的能力协商信息，输入切片不跨调用保存。
+- Linux 1.31 的 `0x18` 是逐逻辑消息变化的 correlation ID，不是整场 Direct 固定 token；当前 `DirectSessionConfig.session_id` 仍是整场固定值，修正 API 语义前不得声称客户端等价。
 - `DirectSessionConfig` 使用公共字段 struct 加 `mode` union；SAM 与 SMP 的独有字段分别由命名 struct 完整包装，再对两个包装做 tagged union，不把每个字段建模成独立 optional。
 - 网络入口和发送动作统一使用完整 Ethernet II 帧，由 EtherType 分流；IPv4 固定 IHL 5、protocol 17、无 IP 分片，并严格校验长度与 checksum。
 - 每片通过端点、session、时间戳、authenticator 和序列校验后立即 ACK；ACK 回显 ID/session/端点，`packet_len=42`、`total_len=0`。
 - 分片采用严格有序单缓冲重组；同 ID 只重发 ACK、不重复追加，跳号和过旧 ID 丢弃且不 ACK。
 - 首片验证 `total_len <= max_message_size`、DES 块和分片规则后，一次分配恰好 `total_len` 字节；默认上限 `1 MiB`，追加前完成边界检查，末片精确补齐。
-- 分片发送默认采用 `3s` ACK 等待和最多 `3` 次发送尝试；重发保持 message ID/flags/payload/session ID/长度/端点，更新时间戳并重算 authenticator。
+- 分片发送默认采用 `3s` ACK 等待和最多 `3` 次发送尝试；重发保持 fragment ID/flags/payload/correlation ID/长度/端点，更新时间戳并重算 authenticator。
 - 未完成重组从首条可接受片段起 `9s` 过期；完成、新首片、会话关闭和 `deinit` 都释放缓冲。
 - SMP 初始化默认在 `0s/30s/60s` 发起三次请求，单次请求等待 `10s`，约 `90s` 后终止认证；三个参数可由 `Config` 覆盖。
 - 时间戳模式为服务器时间或旧客户端单调兼容模式；服务器时间窗口绝对值小于 `61s`，非前进时间戳最多连续接受 5 个包。
@@ -240,6 +243,9 @@ pub fn step(
 
 - 硬件信息、DHCP 第二认证和心跳字段的最小必需集合。
 - 目标服务器对直接通信最高版本和可选字段的组合要求。
+- Direct correlation ID 当前需要由库内部按逻辑消息递增，还是由 adapter 显式提供序列。
+- 原客户端本地端口回退值 `80/8080` 与当前库默认值 `20000` 的兼容策略。
+- SAM `client_ipv4`/`client_mac` 和 SMP `host_disk_serial` 在公开 API 中的正式命名。
 
 ## M5: PEAP 外部隧道编排
 
@@ -287,3 +293,4 @@ pub fn step(
 - 目标服务器实际协商的 PEAP 版本、TLS 参数和证书信任链。
 - `0x5f`、`0x60` 之外服务器可选字段的最小组合。
 - 真实 adapter 对 TLS 分片边界和内部 EAP 包大小的要求。
+- 无服务器 UTC、端口或其他可选字段时，PEAP Direct 应采用的原客户端本地回退值与平台 adapter 责任边界。

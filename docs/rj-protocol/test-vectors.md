@@ -9,7 +9,28 @@ plan: "index.md#文档计划"
 
 本页提供不依赖客户端和认证服务器的固定输入。实现者应逐项匹配字节结果，不要只比较显示文本。
 
-## EAP-MD5
+## 标准 EAP-MD5
+
+输入：
+
+```text
+identifier = 0x17
+password_bytes = "secret"
+challenge = 000102030405060708090a0b0c0d0e0f
+```
+
+摘要与响应 data：
+
+```text
+proof = 0791b0bc38facd8642ac55319122d6ce
+response_data =
+  10
+  0791b0bc38facd8642ac55319122d6ce
+```
+
+第一字节是值长度 16，随后是原始摘要。标准响应不把摘要转换成十六进制文本，也不在 data 中附加用户名。
+
+## 锐捷私有 EAP-MD5
 
 输入：
 
@@ -31,6 +52,8 @@ response_data =
 ```
 
 `response_data` 的第一字节是值长度 32，随后是 32 字节小写摘要文本，最后是用户名。
+
+该向量只适用于锐捷私有用户名证明分支，不能用来验证标准 EAP-MD5。
 
 ## 口令链
 
@@ -185,6 +208,23 @@ mode = 4
 
 ## 直接通信头与 authenticator
 
+SAM 最小握手的固定输入：
+
+```text
+username_bytes = "alice"
+client_ipv4 = c000020a
+client_mac = 001122334455
+```
+
+编码结果：
+
+```text
+010102
+03 05 616c696365
+04 04 c000020a
+05 06 001122334455
+```
+
 输入：
 
 ```text
@@ -221,12 +261,12 @@ MD5 authenticator：
 
 对长度 1400 字节的密文，片段长度与 flags 为：
 
-| 片段 | 密文长度 | total length | flags |
-| ---- | -------- | ------------ | ----- |
-| 1    | 1358     | 1400         | `2`   |
-| 2    | 42       | 1400         | `4`   |
+| 片段 | 密文长度 | fragment ID | correlation ID | total length | flags |
+| ---- | -------- | ----------- | -------------- | ------------ | ----- |
+| 1    | 1358     | 连续值 A    | 本次逻辑消息值 | 1400         | `2`   |
+| 2    | 42       | A + 1       | 与首片相同     | 1400         | `4`   |
 
-两个片段的 message ID 连续，session ID、key、IV 和 total length 不变。
+两个片段的 fragment ID 连续，correlation ID、key、IV 和 total length 不变。测试向量中的 `session_id = 11223344` 只是编码样例，不是原客户端分配规则。
 
 ## 验收方法
 

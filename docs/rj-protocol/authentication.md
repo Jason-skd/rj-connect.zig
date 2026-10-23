@@ -74,6 +74,16 @@ acquired 阶段发送 Identity Response。收到 MD5-Challenge Request 时，客
 
 只有网络完成动作成功后才进入 authenticated。EAP Success 本身不证明客户端已经获得可用地址。
 
+标准 EAP Success 只有 code、identifier 和 length，没有 EAP type/data。锐捷扩展可以在 EAPOL 帧后附加私有字段；Linux 1.31 将这些字段解析到独立的 `SuRadiusPrivate` 上下文。Success code 是进入网络完成和 Direct 初始化的触发器，不代表 Direct 端点、key、IV 或服务类型都编码在 Success 的 `code=3` 中。
+
+Direct 交接至少组合三类输入：
+
+1. 服务器私有上下文，例如 RADIUS 服务类型、对端地址和端口、本地端口覆盖值、DES key/IV、UTC 和服务周期。
+2. 本机网络事实，例如 DHCP 得到的 IPv4、掩码、网关、DNS 和认证适配器 MAC。
+3. 本机软件事实，例如用户名、硬盘序列号、版本和可选安全字段。
+
+Linux 1.31 在 authenticated 处理中调用 `StartDirectTrans`，再按 RADIUS 服务类型 `9` 或 `5` 选择 SAM 或 SMP。MentoHUST 的旧 Echo 路径则是另一种部署兼容分支，不能用来否定官方客户端的 Direct 路径，也不能反过来把所有 EAP-MD5 部署都强制成 SAM/SMP。
+
 ## DHCP 第二认证
 
 DHCP 第二认证只适用于有线 EAP-MD5、锐捷 NAS 和 DHCP 启用同时成立的会话。阶段字段保存为：
@@ -99,7 +109,7 @@ DHCP 第二认证只适用于有线 EAP-MD5、锐捷 NAS 和 DHCP 启用同时�
 
 ## 直接通信与 DHCP 结果
 
-PEAP 路径在获得地址后建立 SAM 或 SMP 会话，并发送 IP 和主机信息。用户信息发送成功后启动 9 秒结果计时器。
+在服务器通过 RADIUS 服务类型选择 SAM 或 SMP 的 PEAP、EAP-MD5 路径中，客户端在获得地址后建立 Direct 会话并发送 IP 和主机信息。用户信息发送成功后启动 9 秒结果计时器。
 
 服务器通过 SAM 或 SMP 返回成功标志和可选文本：
 
@@ -110,7 +120,7 @@ PEAP 路径在获得地址后建立 SAM 或 SMP 会话，并发送 IP 和主机�
 | 成功标志为假且无文本 | 以结果超时语义进入 logoff          |
 | 9 秒内没有结果       | 取消会话并进入 logoff              |
 
-直接通信载荷中的结果字段见 [SAM/SMP 直接通信](direct.md)。
+直接通信载荷中的结果字段见 [SAM/SMP 直接通信](direct.md)。Direct 初始化所需的精确字段来源、消息关联 ID 和本地端口回退见同页“ID 分配与重发”和“端口、时间戳与本地回退”。
 
 ## PEAP 路径
 
@@ -119,6 +129,8 @@ PEAP 路径在获得地址后建立 SAM 或 SMP 会话，并发送 IP 和主机�
 TLS 隧道内按服务器协商结果执行内层认证。锐捷扩展常见路径使用 MSCHAPv2，用户名和密码使用调用方提供的凭据。PEAP 的私有字段使用紧凑容器，口令字段 `0x5f` 使用固定起始值，V3 摘要字段 `0x60` 使用与 EAP-MD5 相同的五模式构造。
 
 外层 PEAP Success 后，客户端获取 IPv4 地址并启动直接通信。服务器可以在隧道内下发 SAM/SMP 端口、地址、最大版本和其他会话参数；这些参数必须在内层认证完成前保存到独立候选状态。
+
+确定性实现不应自行猜测缺失的服务器值。可由服务器字段、DHCP 结果和本机适配器权威导出的值应在协议层组合；时间起点、是否真实绑定本地端口、TLS 证书策略和平台 I/O 仍由 adapter 提供。当前库要求无服务器 UTC 时显式提供单调时间起点，并要求调用方提供固定 Direct 配置，这是确定性和平台隔离边界，不表示官方客户端没有本地回退值。
 
 ## Held 与重试
 
@@ -138,7 +150,7 @@ logoff 阶段必须执行以下动作：
 
 1. 停止 connecting、auth、held、DHCP 和直接结果计时器。
 2. 关闭 SAM/SMP 发送器与分片接收缓冲。
-3. 清除 key、IV、challenge、会话 ID 和当前 identifier。
+3. 清除 key、IV、challenge、Direct correlation ID、片段计数器和当前 identifier。
 4. 在尚未终态时发送 EAPOL Logoff。
 5. 转入 disconnected，等待下一次显式启动。
 

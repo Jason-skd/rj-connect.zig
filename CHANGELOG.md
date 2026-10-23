@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- 协议报告区分标准 EAP-MD5 口令证明与锐捷私有用户名证明，并补充各自的固定向量。
+- Direct 文档区分逐消息的 correlation ID 与逐片段的 fragment ID，补充 Linux 1.31 的起始值和重发保持规则。
+- SAM 初始字段明确为本机 IPv4 和 MAC；SMP hello 第二 TLV 明确为硬盘序列号。
+- 补充 Direct 端口、服务器 UTC 缺失时的本地回退，以及原始客户端与当前 adapter 的责任边界。
+- 研究范围补充 macOS 1.35 与 Windows 6.85 结构级样本，并明确 V3 材料与客户端构建绑定。
+
+### Limits
+
+- 当前 `DirectSessionConfig.session_id` 仍作为整场固定值发送，尚未复刻 Linux 1.31 的逐逻辑消息递增语义。
+- 当前 `local_udp_port` 默认值 `20000` 是库设计选择，不是原客户端回退值 `80`。
+- 当前 EAP-MD5 确定性路径只实现锐捷私有用户名证明；标准 EAP-MD5 变体尚未进入 `Session`。
+- macOS 1.35 与 Windows 6.85 仅完成结构级浅检，其 Direct 状态与本地回退值仍需逐项验证。
+
 ## v.0.1.0
 
 ### Changed
@@ -25,7 +42,7 @@
 
 ### Limits
 
-- 研究范围主要为锐捷 1.30、1.31 与 1.33 的有线认证协议族；完整跨版本兼容性、部署所需可选字段及 IPv6 部分字段语义仍有待验证。
+- 主要研究基线为锐捷 1.30、1.31 与 1.33，补充核对 macOS 1.35 与 Windows 6.85；完整跨版本兼容性、部署所需可选字段及 IPv6 部分字段语义仍有待验证。
 - Zig 复刻支持 PEAPv0 与隧道内 EAP-MSCHAPv2 编排；PEAPv1/v2 和 cryptobinding 返回 `UnsupportedPeapMode`，Direct 限于 IPv4、IHL 5、无 IP 分片和 direct version 1。
 - 网络 I/O、时钟、随机数、凭据、DHCP 系统操作、TLS、证书验证与 MSCHAPv2 计算属于外部适配。离线测试不证明真实校园网互操作。
 

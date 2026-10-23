@@ -9,6 +9,8 @@ plan: "index.md#文档计划"
 
 本页定义认证帧的完整外层、请求类型分派和 EAP-MD5 响应构造。实现者完成本页后可以生成 Start、Identity、MD5-Challenge、Notification、NAK 和 Logoff 帧。
 
+EAP-MD5 至少存在两种已观察响应：标准口令证明和锐捷私有用户名证明。它们不能共用同一个 encoder。
+
 ## 以太网与 EAPOL 外层
 
 认证帧是以太网 II 帧，EtherType 为大端 `0x888E`。标准目的地址为 `01:80:C2:00:00:03`，锐捷 NAS 模式可使用服务器返回的地址。
@@ -48,7 +50,7 @@ EAP body 从 EAPOL 偏移 `0x12` 开始。
 | Identity，type `1`           | 返回 Identity Response                 |
 | Notification，type `2`       | 回报 Notification Response，正文可为空 |
 | Legacy NAK，type `3`         | 返回 NAK Response                      |
-| MD5-Challenge，type `4`      | 计算并返回 MD5 Response                |
+| MD5-Challenge，type `4`      | 按部署分支计算标准或锐捷私有 MD5 Response |
 | OTP，type `5`                | 返回 NAK Response                      |
 | Generic Token Card，type `6` | 返回 NAK Response                      |
 | Credential，type `7`         | 返回用户名和口令字节                   |
@@ -78,9 +80,25 @@ name[name_length]
 
 认证核心要求 `value_size=16`。服务器附带的 name 可用于显示或服务选择，但不参与口令摘要。
 
-## MD5 响应
+## 标准 EAP-MD5 响应
 
-客户端先计算单字节 EAP identifier、用户名和 challenge 的标准 MD5：
+标准分支遵循常见 802.1X EAP-MD5 语义。客户端用单字节 EAP identifier、口令原始字节和 challenge 计算：
+
+```text
+proof = MD5(id:u8 || password_bytes || challenge[16])
+```
+
+响应 data 为：
+
+```text
+10 proof[16]
+```
+
+首个字节是值长度 `16`，随后是 16 字节原始摘要，不转换成十六进制文本，也不附加用户名。MentoHUST 的 `checkPass` 走这一分支；Linux 1.31 内嵌的 wpa_supplicant 也保留这一标准路径。
+
+## 锐捷私有 EAP-MD5 响应
+
+锐捷私有分支先计算单字节 EAP identifier、用户名 GBK 字节和 challenge 的标准 MD5：
 
 ```text
 proof = MD5(id:u8 || username_bytes || challenge[16])
@@ -101,7 +119,9 @@ proof_text = lowercase_hex(proof)
 02 id len_hi len_lo 04 20 proof_text[32] username_bytes
 ```
 
-EAP length 等于 `5 + 1 + 32 + len(username_bytes)`。`proof_text` 使用小写十六进制。用户名不参与响应 value-size。
+EAP length 等于 `5 + 1 + 32 + len(username_bytes)`。`proof_text` 使用小写十六进制。用户名不参与响应 value-size。该分支随后还可附加 legacy DHCP 信息、口令字段、V3 摘要和其他锐捷私有属性。
+
+Linux 1.31 的 `CStateMachineThread::txRspAuth` 明确构造这一私有响应。它不是 RFC 3748 EAP-MD5 的标准口令证明，文档和实现都必须用独立分支名称区分。
 
 ## 凭证响应
 
