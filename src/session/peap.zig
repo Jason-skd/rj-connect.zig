@@ -224,6 +224,7 @@ pub const Machine = struct {
                 try self.handlePeapRequest(now, packet.data, builder, replacement_tls);
             },
             .success => {
+                if (self.state == .waiting_dhcp) return error.DuplicateFrame;
                 if (self.last_outer_response_identifier == null or
                     self.last_outer_response_identifier.? != packet.identifier or
                     !self.inner_success or !self.tls_established)

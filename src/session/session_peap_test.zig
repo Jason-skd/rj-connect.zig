@@ -275,6 +275,13 @@ fn drivePeapToWaitingDhcp(allocator: std.mem.Allocator, session: *Session, info:
     var complete = try session.step(timestamp(11 * std.time.ns_per_s), frameInput(session, &success));
     defer complete.deinit(allocator);
     try std.testing.expectEqual(ActivePhase{ .peap = .waiting_dhcp }, complete.phase);
+    const deadline = session.nextDeadline().?;
+    try std.testing.expectError(
+        error.DuplicateFrame,
+        session.step(timestamp(12 * std.time.ns_per_s), frameInput(session, &success)),
+    );
+    try std.testing.expectEqual(deadline, session.nextDeadline().?);
+    try std.testing.expectEqual(ActivePhase{ .peap = .waiting_dhcp }, session.phase());
 }
 
 fn preparePeapSelection(allocator: std.mem.Allocator, session: *Session) !void {
