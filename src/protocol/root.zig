@@ -2,7 +2,9 @@
 
 pub const wire = @import("wire.zig");
 pub const eapol = @import("eapol.zig");
+pub const eap = @import("eap.zig");
 pub const peap = @import("peap.zig");
+pub const ruijie_peap = @import("ruijie_peap.zig");
 pub const dhcp = @import("dhcp.zig");
 pub const vendor = @import("vendor.zig");
 pub const direct = @import("direct.zig");
@@ -14,7 +16,9 @@ pub const des = @import("des.zig");
 test {
     _ = wire;
     _ = eapol;
+    _ = eap;
     _ = peap;
+    _ = ruijie_peap;
     _ = dhcp;
     _ = vendor;
     _ = direct;

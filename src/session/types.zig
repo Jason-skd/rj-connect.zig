@@ -45,12 +45,12 @@ pub const PeapConfig = struct {
     service_name_gbk: []const u8 = &.{},
     program_name_gbk: []const u8 = "8021x.exe",
     client_version: [4]u8 = .{ 1, 33, 1, 2 },
-    os_bits: u8 = 0x40,
     disk_serial_ascii: []const u8 = &.{},
     security_domain_ascii: []const u8 = &.{},
     security_check_ok: bool = true,
     ipd_result: []const u8 = &.{},
-    ipv6_addresses: [4]?[16]u8 = .{ null, null, null, null },
+    ipv6_aux_state: ?u8 = null,
+    ipv6_addresses: [3]?[16]u8 = .{ null, null, null },
     direct_max_version: u8 = 2,
     tls_fragment_size: usize = 1200,
     local_udp_port: u16 = 20000,
@@ -69,7 +69,6 @@ pub const PeapConfig = struct {
             self.ipd_result.len > 255 or
             self.tls_fragment_size == 0 or
             self.tls_fragment_size > max_tls_fragment_size or
-            (self.os_bits != 0x20 and self.os_bits != 0x40) or
             self.direct_max_version == 0)
         {
             return error.InvalidConfig;
