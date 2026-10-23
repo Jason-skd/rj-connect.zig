@@ -8,6 +8,48 @@
 从一个 `start` 建立连接到认证终止的一次确定性运行。
 _Avoid_: 连接、登录流程
 
+**认证方法策略**：
+一次认证尝试允许使用的外层 EAP 方法集合；服务器只能从中选择，不能使调用方静默采用未配置的方法。
+_Avoid_: 自动降级、方法回退
+
+## PEAP 与外部隧道
+
+**PEAP**：
+承载 TLS 隧道及隧道内 EAP 交换的外层 EAP 方法。
+_Avoid_: TLS 连接、MSCHAPv2 登录
+
+**PEAP 外层阶段**：
+从服务器选择 PEAP 到隧道认证结束的确定性协议阶段。
+_Avoid_: TLS 会话、PEAP provider
+
+**PEAP 主路径**：
+由 PEAPv0 外层和隧道内 EAP-MSCHAPv2 组成的 M5 验收认证路径。
+_Avoid_: 全部 PEAP 版本、无线登录流程
+
+**TLS adapter**：
+由调用方拥有并执行 TLS 握手、记录保护和证书策略的外部组件。
+_Avoid_: TLS provider、库内 TLS
+
+**隧道输入**：
+服务器 PEAP 载荷中交给 TLS adapter 的不透明 TLS 字节。
+_Avoid_: 内层 EAP、解密载荷
+
+**隧道输出**：
+TLS adapter 返回的待封装 TLS 字节、可选的已解密内层 EAP 字节和处理状态。
+_Avoid_: EAPOL 帧、网络发送结果
+
+**MSCHAPv2 provider**：
+由调用方拥有并执行隧道内 MSCHAPv2 认证计算及成功认证器校验的外部组件。
+_Avoid_: 凭据存储、EAP codec
+
+**PEAP V3 输入材料**：
+计算 PEAP V3 摘要所需、由调用方提供的应用数据和动态库数据。
+_Avoid_: 客户端安装路径、运行时文件读取
+
+**PEAP Direct 交接**：
+PEAP 完成且租约和直接会话参数齐备后，同一 `Session` 从 PEAP 阶段转入 Direct 阶段的一次转换。
+_Avoid_: 第二会话、隐式默认配置
+
 ## 直接通信
 
 **直接帧**：

@@ -252,6 +252,14 @@ pub fn step(
 - TLS provider 通过不透明隧道字节与库交互，调用方负责证书和凭据策略。
 - PEAP 编排仍由统一 `Session` 管理，不创建第二个公开生命周期。
 - 目标校园网的证书信任策略属于 adapter 配置，不进入协议状态。
+- M5 以当前校园网的有线 PEAP/MSCHAPv2 到 DHCP、SAM/SMP 的路径为验收主线；无线接入与未观察的 PEAP 变体只保留明确兼容边界。
+- 统一 `start` 不预先指定 EAP 方法。配置声明允许的方法集合，服务器选择实际方法，未配置或不支持的方法显式失败。
+- 库拥有 PEAP 外层与内层 EAP 编排；`tunnel_input` 把服务器 TLS 字节交给 adapter，`tunnel_output` 返回待封装 TLS 字节、可选内层 EAP 字节和处理状态，TLS session 与证书策略不进入库。
+- MSCHAPv2 provider 返回标准 EAP-MSCHAPv2 Response payload；库校验内层 EAP 外层、identifier 和结构，并在响应后追加锐捷紧凑字段。
+- PEAP V3 所需的应用数据与动态库数据由调用方提供，库在提交配置时复制；不读取客户端二进制或运行时文件。
+- M5 的实现与验收范围为 PEAPv0 加 EAP-MSCHAPv2。PEAPv1/v2 和 cryptobinding 返回独立的 `UnsupportedPeapMode`，不得在没有 TLS 派生密钥的情况下伪装成功。
+- PEAP 成功且完整租约、服务器 Direct 参数和本地配置齐备后，同一 `Session` 自动切换到 Direct；缺少任何必需值时返回 `MissingDirectParameters`，不填猜测默认值。
+- Direct 的 `reauth_required` 只终止旧会话并回到 `idle`；下一轮认证仍由调用方显式提交 `start`。
 
 ### 验收
 
