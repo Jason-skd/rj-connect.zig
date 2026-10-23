@@ -1,6 +1,7 @@
 const std = @import("std");
 const eap = @import("../protocol/eap.zig");
 const eapol = @import("../protocol/eapol.zig");
+const vendor = @import("../protocol/vendor.zig");
 const session_api = @import("session.zig");
 
 const Action = session_api.Action;
@@ -82,6 +83,142 @@ fn peapConfig() PeapConfig {
         .v3_application_data = "app-data",
         .v3_dll_data = "dll-data",
     };
+}
+
+fn directPeapConfig() PeapConfig {
+    return .{
+        .v3_application_data = "app-data",
+        .v3_dll_data = "dll-data",
+        .direct_session_id = 0x11223344,
+        .local_udp_port = 20000,
+        .sam = .{
+            .session_parameter = .{ 1, 2, 3, 4 },
+            .endpoint_parameter = .{ 1, 2, 3, 4, 5, 6 },
+        },
+    };
+}
+
+fn serverFields(output: []u8, include_radius: bool) ![]const u8 {
+    var offset: usize = 0;
+    const fields = [_]vendor.Field{
+        .{ .code = 0x56, .value = &.{ 0, 0, 0, 30 } },
+        .{ .code = 0x59, .value = &.{ 0, 0, 0, 10 } },
+        .{ .code = 0x5a, .value = &.{ 0, 0, 0x1f, 0x90 } },
+        .{ .code = 0x5b, .value = &.{ 192, 0, 2, 1 } },
+        .{ .code = 0x5c, .value = "key-key!" },
+        .{ .code = 0x5d, .value = "iv-iv-iv" },
+        .{ .code = 0x5e, .value = &.{ 0, 0, 0, 0, 0, 0, 0, 100 } },
+        .{ .code = 0x6e, .value = &.{ 0, 0, 0x4e, 0x20 } },
+    };
+    for (fields) |field| {
+        offset += try vendor.writeCompact(output[offset..], field);
+    }
+    if (include_radius) {
+        offset += try vendor.writeCompact(output[offset..], .{ .code = 0x61, .value = &.{9} });
+    }
+    return output[0..offset];
+}
+
+fn drivePeapToWaitingDhcp(session: *Session, info: []const u8) !void {
+    var started = try session.step(timestamp(0), .start);
+    started.deinit(std.testing.allocator);
+    const identity = identityRequest(0x16);
+    var acquired = try session.step(timestamp(std.time.ns_per_s), frameInput(session, &identity));
+    acquired.deinit(std.testing.allocator);
+    var identified = try session.step(timestamp(2 * std.time.ns_per_s), .{
+        .credentials = .{ .username = "alice", .password = "secret" },
+    });
+    identified.deinit(std.testing.allocator);
+
+    const request = peapRequest(0x17);
+    var selected = try session.step(timestamp(3 * std.time.ns_per_s), frameInput(session, &request));
+    selected.deinit(std.testing.allocator);
+
+    var identity_buffer: [16]u8 = undefined;
+    const inner_identity = innerRequest(&identity_buffer, 1, .identity, &.{});
+    var identity_batch = try session.step(timestamp(4 * std.time.ns_per_s), .{
+        .tunnel_output = .{
+            .generation = session.currentGeneration(),
+            .output = .{
+                .status = .established,
+                .outbound_tls = "client-hello",
+                .plaintext = inner_identity,
+            },
+        },
+    });
+    identity_batch.deinit(std.testing.allocator);
+
+    var protected_identity = try session.step(timestamp(5 * std.time.ns_per_s), .{
+        .credentials = .{ .username = "alice", .password = "secret" },
+    });
+    protected_identity.deinit(std.testing.allocator);
+
+    var challenge_buffer: [32]u8 = undefined;
+    const challenge = innerRequest(&challenge_buffer, 2, .mschapv2, &.{ 1, 0x11 });
+    var challenge_batch = try session.step(timestamp(6 * std.time.ns_per_s), .{
+        .tunnel_output = .{
+            .generation = session.currentGeneration(),
+            .output = .{
+                .status = .established,
+                .outbound_tls = "client-identity",
+                .plaintext = challenge,
+            },
+        },
+    });
+    challenge_batch.deinit(std.testing.allocator);
+
+    var response = try session.step(timestamp(7 * std.time.ns_per_s), .{
+        .external_result = .{
+            .generation = session.currentGeneration(),
+            .result = .{ .mschapv2_response = .{
+                .credentials = .{ .username = "alice", .password = "secret" },
+                .response_data = &.{ 2, 0x22 },
+            } },
+        },
+    });
+    response.deinit(std.testing.allocator);
+
+    var success_buffer: [32]u8 = undefined;
+    const success_request = innerRequest(&success_buffer, 3, .mschapv2, &.{ 3, 0 });
+    var success_batch = try session.step(timestamp(8 * std.time.ns_per_s), .{
+        .tunnel_output = .{
+            .generation = session.currentGeneration(),
+            .output = .{
+                .status = .established,
+                .outbound_tls = "client-response",
+                .plaintext = success_request,
+            },
+        },
+    });
+    success_batch.deinit(std.testing.allocator);
+
+    var verified = try session.step(timestamp(9 * std.time.ns_per_s), .{
+        .external_result = .{
+            .generation = session.currentGeneration(),
+            .result = .{ .mschapv2_success = .{
+                .verified = true,
+                .response_data = &.{3},
+            } },
+        },
+    });
+    verified.deinit(std.testing.allocator);
+
+    var server_info_batch = try session.step(timestamp(10 * std.time.ns_per_s), .{
+        .tunnel_output = .{
+            .generation = session.currentGeneration(),
+            .output = .{
+                .status = .established,
+                .outbound_tls = "client-final",
+                .plaintext = info,
+            },
+        },
+    });
+    server_info_batch.deinit(std.testing.allocator);
+
+    const success = terminalRequest(0x17);
+    var complete = try session.step(timestamp(11 * std.time.ns_per_s), frameInput(session, &success));
+    defer complete.deinit(std.testing.allocator);
+    try std.testing.expectEqual(ActivePhase{ .peap = .waiting_dhcp }, complete.phase);
 }
 
 fn preparePeapSelection(session: *Session) !void {
@@ -384,4 +521,67 @@ test "PEAP cancellation sends one logoff and reaches idle" {
     try std.testing.expectEqual(@as(usize, 1), canceled.actions.len);
     const logoff = try eapol.decode(canceled.actions[0].send_frame);
     try std.testing.expectEqual(eapol.PacketType.logoff, logoff.packet_type);
+}
+
+test "complete PEAP DHCP lease starts Direct in the same lifecycle" {
+    var session = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .allowed_methods = .{ .md5_challenge = false, .peap = true },
+        .peap = directPeapConfig(),
+    });
+    defer session.deinit();
+
+    var info_buffer: [128]u8 = undefined;
+    const info = try serverFields(&info_buffer, true);
+    try drivePeapToWaitingDhcp(&session, info);
+    const peap_generation = session.currentGeneration();
+
+    var direct = try session.step(timestamp(12 * std.time.ns_per_s), .{
+        .external_result = .{
+            .generation = peap_generation,
+            .result = .{ .dhcp_lease = .{
+                .ip = .{ 192, 0, 2, 10 },
+                .netmask = .{ 255, 255, 255, 0 },
+                .gateway = .{ 192, 0, 2, 1 },
+                .dns = .{ 203, 0, 113, 53 },
+            } },
+        },
+    });
+    defer direct.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(ActivePhase{ .direct = .initializing }, direct.phase);
+    try std.testing.expectEqual(ActivePhase{ .direct = .initializing }, session.phase());
+    try std.testing.expect(!peap_generation.eql(session.currentGeneration()));
+    try std.testing.expectEqual(@as(usize, 1), direct.actions.len);
+    _ = try @import("../protocol/direct.zig").decodeFrame(direct.actions[0].send_frame);
+}
+
+test "missing PEAP Direct parameters fail without leaving the waiting state" {
+    var session = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .allowed_methods = .{ .md5_challenge = false, .peap = true },
+        .peap = directPeapConfig(),
+    });
+    defer session.deinit();
+
+    var info_buffer: [128]u8 = undefined;
+    const info = try serverFields(&info_buffer, false);
+    try drivePeapToWaitingDhcp(&session, info);
+    const generation = session.currentGeneration();
+
+    try std.testing.expectError(
+        error.MissingDirectParameters,
+        session.step(timestamp(12 * std.time.ns_per_s), .{
+            .external_result = .{
+                .generation = generation,
+                .result = .{ .dhcp_lease = .{
+                    .ip = .{ 192, 0, 2, 10 },
+                    .netmask = .{ 255, 255, 255, 0 },
+                    .gateway = .{ 192, 0, 2, 1 },
+                    .dns = .{ 203, 0, 113, 53 },
+                } },
+            },
+        }),
+    );
+    try std.testing.expectEqual(ActivePhase{ .peap = .waiting_dhcp }, session.phase());
 }

@@ -56,6 +56,9 @@ pub const PeapConfig = struct {
     tls_fragment_size: usize = 1200,
     local_udp_port: u16 = 20000,
     direct_session_id: ?u32 = null,
+    direct_timestamp: ?DirectTimestampMode = null,
+    sam: ?SamConfig = null,
+    smp: ?SmpConfig = null,
     network: ?DirectNetworkInfo = null,
 
     pub fn validate(self: PeapConfig) Error!void {

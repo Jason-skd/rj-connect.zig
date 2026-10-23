@@ -245,6 +245,9 @@ pub const Session = struct {
                 self.context.generation = engine.currentGeneration();
                 self.context.last_now = now;
                 self.failure_reason = result.failure;
+                if (engine.readyDirectConfig()) |config| {
+                    return self.startPeapDirect(now, engine, config, result);
+                }
                 if (result.phase == .idle) {
                     engine.deinit();
                     self.machine = .empty;
@@ -353,6 +356,60 @@ pub const Session = struct {
         result.generation = generation;
         result.next_deadline = self.nextDeadline();
         return result;
+    }
+
+    fn startPeapDirect(
+        self: *Session,
+        now: std.Io.Timestamp,
+        peap_engine: *peap_machine.Machine,
+        config: DirectSessionConfig,
+        peap_result: Outcome,
+    ) Error!Outcome {
+        var peap_actions_owned = true;
+        errdefer if (peap_actions_owned) {
+            session_outcome.freeActions(self.allocator, peap_result.actions);
+        };
+
+        const generation = try self.context.generation.next();
+        var candidate = try direct_machine.Machine.init(
+            self.allocator,
+            config,
+            now,
+            generation,
+        );
+        errdefer candidate.deinit();
+        const direct_result = try candidate.start(now);
+        var direct_actions_owned = true;
+        errdefer if (direct_actions_owned) {
+            session_outcome.freeActions(self.allocator, direct_result.actions);
+        };
+
+        const combined = try self.allocator.alloc(
+            Action,
+            peap_result.actions.len + direct_result.actions.len,
+        );
+        errdefer session_outcome.freeActions(self.allocator, combined);
+        @memcpy(combined[0..peap_result.actions.len], peap_result.actions);
+        @memcpy(combined[peap_result.actions.len..], direct_result.actions);
+        self.allocator.free(peap_result.actions);
+        peap_actions_owned = false;
+        self.allocator.free(direct_result.actions);
+        direct_actions_owned = false;
+
+        peap_engine.deinit();
+        self.machine = .{ .direct = candidate };
+        self.context.generation = generation;
+        self.context.last_now = now;
+        self.failure_reason = null;
+        self.eap_peer_mac = config.peer_mac;
+        return .{
+            .actions = combined,
+            .previous_phase = peap_result.previous_phase,
+            .phase = .{ .direct = candidate.phase },
+            .next_deadline = candidate.nextDeadline(),
+            .failure = null,
+            .generation = generation,
+        };
     }
 
     fn cancel(self: *Session, now: std.Io.Timestamp) Error!Outcome {

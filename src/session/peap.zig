@@ -59,6 +59,8 @@ pub const Machine = struct {
     dhcp_poll_attempts: u8 = 0,
     failure_reason: ?FailureReason = null,
     server_info: ruijie.ServerInfo = .{},
+    username_gbk: ?[]u8 = null,
+    direct_ready: ?types.DirectSessionConfig = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -83,7 +85,9 @@ pub const Machine = struct {
 
     pub fn deinit(self: *Machine) void {
         if (self.tls_buffer) |buffer| self.allocator.free(buffer);
+        if (self.username_gbk) |username| self.allocator.free(username);
         self.tls_buffer = null;
+        self.username_gbk = null;
     }
 
     pub fn currentPhase(self: *const Machine) types.ActivePhase {
@@ -111,6 +115,14 @@ pub const Machine = struct {
 
     pub fn isWaitingDhcp(self: *const Machine) bool {
         return self.state == .waiting_dhcp;
+    }
+
+    pub fn readyDirectConfig(self: *const Machine) ?types.DirectSessionConfig {
+        return self.direct_ready;
+    }
+
+    pub fn clearReadyDirect(self: *Machine) void {
+        self.direct_ready = null;
     }
 
     pub fn step(self: *Machine, now: std.Io.Timestamp, input: Input) Error!Outcome {
@@ -263,6 +275,7 @@ pub const Machine = struct {
         try self.addOutboundTunnelFrames(output.outbound_tls, builder);
         if (output.plaintext.len != 0) {
             try self.handlePlaintext(now, output.plaintext, builder);
+            if (self.state == .protecting) self.advanceProtectedStage();
         } else if (self.state == .protecting) {
             self.advanceProtectedStage();
         }
@@ -316,6 +329,10 @@ pub const Machine = struct {
                 return error.InvalidTunnelInput;
             return;
         };
+        if (packet.encoded_len < plaintext.len) {
+            self.server_info = ruijie.parseServerInfo(plaintext[packet.encoded_len..]) catch
+                return error.InvalidTunnelInput;
+        }
         if (packet.code == .success) {
             self.inner_success = true;
             self.state = .awaiting_outer_success;
@@ -374,6 +391,7 @@ pub const Machine = struct {
         if (credentials.username.len == 0 or credentials.username.len > 255) {
             return error.InvalidCredentials;
         }
+        try self.captureUsername(credentials.username);
         const identifier = self.inner_identifier orelse return error.InvalidState;
         const packet = try encodeInner(
             self.allocator,
@@ -425,7 +443,10 @@ pub const Machine = struct {
                 self.protect_stage = .mschapv2_success;
                 self.deadline = try time.addDuration(now, .fromSeconds(30));
             },
-            .dhcp_lease => return error.InvalidState,
+            .dhcp_lease => |lease| {
+                if (self.state != .waiting_dhcp) return error.InvalidState;
+                self.direct_ready = try self.makeDirectConfig(lease);
+            },
         }
     }
 
@@ -439,6 +460,7 @@ pub const Machine = struct {
         if (response.credentials.username.len == 0 or response.credentials.username.len > 255) {
             return error.InvalidCredentials;
         }
+        try self.captureUsername(response.credentials.username);
         var digest: [128]u8 = undefined;
         _ = v3.digest(
             self.config.v3_application_data,
@@ -528,6 +550,64 @@ pub const Machine = struct {
         self.protect_stage = null;
     }
 
+    fn captureUsername(self: *Machine, username: []const u8) Error!void {
+        if (self.username_gbk) |existing| {
+            if (std.mem.eql(u8, existing, username)) return;
+            return error.InvalidCredentials;
+        }
+        self.username_gbk = try self.allocator.dupe(u8, username);
+    }
+
+    fn makeDirectConfig(self: *Machine, lease: types.DhcpLease) Error!?types.DirectSessionConfig {
+        const ip = lease.ip orelse return null;
+        const netmask = lease.netmask orelse return null;
+        const gateway = lease.gateway orelse return null;
+        const dns = lease.dns orelse return null;
+        const peer_ipv4 = self.server_info.direct_ipv4 orelse
+            return error.MissingDirectParameters;
+        const peer_udp_port = self.server_info.direct_udp_port orelse
+            return error.MissingDirectParameters;
+        const des_key = self.server_info.des_key orelse return error.MissingDirectParameters;
+        const initial_iv = self.server_info.initial_iv orelse return error.MissingDirectParameters;
+        const session_id = self.config.direct_session_id orelse
+            return error.MissingDirectParameters;
+        const username = self.username_gbk orelse return error.MissingDirectParameters;
+        const timestamp = if (self.server_info.server_utc) |server_time|
+            types.DirectTimestampMode{ .server = server_time }
+        else
+            self.config.direct_timestamp orelse return error.MissingDirectParameters;
+        const mode: types.DirectMode = switch (self.server_info.radius_type orelse
+            return error.MissingDirectParameters) {
+            .sam => .{ .sam = self.config.sam orelse return error.MissingDirectParameters },
+            .smp => .{ .smp = self.config.smp orelse return error.MissingDirectParameters },
+        };
+
+        const config: types.DirectSessionConfig = .{
+            .mode = mode,
+            .peer_mac = self.peer_mac,
+            .peer_ipv4 = peer_ipv4,
+            .peer_udp_port = peer_udp_port,
+            .local_udp_port = self.server_info.local_udp_port orelse self.config.local_udp_port,
+            .session_id = session_id,
+            .des_key = des_key,
+            .initial_iv = initial_iv,
+            .timestamp = timestamp,
+            .username_gbk = username,
+            .network = .{
+                .ipv4 = ip,
+                .netmask = netmask,
+                .gateway = gateway,
+                .dns = dns,
+                .alternate_dns = lease.alternate_dns,
+                .mac = self.source_mac,
+            },
+            .heartbeat_interval = seconds(self.server_info.heartbeat_interval_seconds),
+            .reauth_interval = seconds(self.server_info.reauth_interval_seconds),
+        };
+        try config.validate();
+        return config;
+    }
+
     fn finish(self: *Machine, reason: FailureReason) Error!void {
         self.state = .idle;
         self.deadline = .fromNanoseconds(0);
@@ -535,6 +615,10 @@ pub const Machine = struct {
         self.tls_expected_length = null;
     }
 };
+
+fn seconds(value: ?u32) std.Io.Duration {
+    return .fromSeconds(if (value) |seconds_value| @intCast(seconds_value) else 0);
+}
 
 fn encodeInner(
     allocator: std.mem.Allocator,
