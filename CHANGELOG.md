@@ -1,6 +1,6 @@
 # Changelog
 
-## f719ceb
+## 368a85a
 
 ### Added
 
@@ -16,6 +16,13 @@
 - `Config` 现在声明允许的 EAP 方法并可携带 PEAP 配置；PEAP 输入材料由 `Session.init` 复制。
 - `ActivePhase` 新增 `peap`，`Input` 新增 `tunnel_output`，`Action` 新增隧道和 MSCHAPv2 外部请求。
 - 统一 DHCP external result 现在可携带 netmask、DNS 和备用 DNS；EAP-MD5 原有字段选择保持不变。
+
+### Fixed
+
+- PEAP 外层拒绝重复、乱序、冲突长度和未声明长度不一致的 TLS 分片；TLS 未建立时不再接受内层明文。
+- 空口令按一个 16 字节块加密；V3 应用数据与动态库数据超出上限时返回 `InputTooLarge`。
+- EAP-MD5 与 PEAP 共用 DHCP `2s × 21` 轮询策略；PEAP 公开轮询计数返回真实值。
+- Direct 帧在动作提交失败时不再被重复释放。
 
 ### Limits
 
