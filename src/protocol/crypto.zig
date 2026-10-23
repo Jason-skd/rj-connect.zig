@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const PasswordError = error{
+    LengthOverflow,
     OutputTooSmall,
 };
 
@@ -10,8 +11,16 @@ pub const Rc4Error = error{
 };
 
 /// Returns the zero-padded ciphertext size for a RADIUS User-Password value.
-pub fn passwordCiphertextSize(plain_len: usize) usize {
-    return (plain_len + 15) & ~@as(usize, 15);
+pub fn passwordCiphertextSize(plain_len: usize) PasswordError!usize {
+    const block_size: usize = 16;
+    const remainder = plain_len % block_size;
+    const padding = if (plain_len == 0)
+        block_size
+    else if (remainder == 0)
+        0
+    else
+        block_size - remainder;
+    return std.math.add(usize, plain_len, padding) catch error.LengthOverflow;
 }
 
 /// Encrypts a password with the chained MD5 form used by the vendor attributes.
@@ -22,7 +31,7 @@ pub fn encryptPassword(
     plaintext: []const u8,
     output: []u8,
 ) PasswordError!usize {
-    const ciphertext_len = passwordCiphertextSize(plaintext.len);
+    const ciphertext_len = try passwordCiphertextSize(plaintext.len);
     if (output.len < ciphertext_len) return error.OutputTooSmall;
 
     @memset(output[0..ciphertext_len], 0);
@@ -128,16 +137,35 @@ test "password encryption chains MD5 across blocks" {
 }
 
 test "password encryption reports the required padded size" {
-    try std.testing.expectEqual(@as(usize, 0), passwordCiphertextSize(0));
-    try std.testing.expectEqual(@as(usize, 16), passwordCiphertextSize(1));
-    try std.testing.expectEqual(@as(usize, 16), passwordCiphertextSize(16));
-    try std.testing.expectEqual(@as(usize, 32), passwordCiphertextSize(17));
+    try std.testing.expectEqual(@as(usize, 16), try passwordCiphertextSize(0));
+    try std.testing.expectEqual(@as(usize, 16), try passwordCiphertextSize(1));
+    try std.testing.expectEqual(@as(usize, 16), try passwordCiphertextSize(16));
+    try std.testing.expectEqual(@as(usize, 32), try passwordCiphertextSize(17));
+    try std.testing.expectError(
+        error.LengthOverflow,
+        passwordCiphertextSize(std.math.maxInt(usize)),
+    );
 
     var short: [15]u8 = undefined;
     try std.testing.expectError(
         error.OutputTooSmall,
         encryptPassword("alice", @splat(0), "secret", &short),
     );
+}
+
+test "empty password encrypts as one padded block" {
+    var encrypted: [16]u8 = undefined;
+    const written = try encryptPassword("alice", @splat(0), "", &encrypted);
+
+    try std.testing.expectEqual(@as(usize, 16), written);
+
+    var hash = std.crypto.hash.Md5.init(.{});
+    hash.update("alice");
+    const empty_challenge: [16]u8 = @splat(0);
+    hash.update(&empty_challenge);
+    var expected_mask: [std.crypto.hash.Md5.digest_length]u8 = undefined;
+    hash.final(&expected_mask);
+    try std.testing.expectEqualSlices(u8, &expected_mask, &encrypted);
 }
 
 test "RC4 matches the standard test vector" {

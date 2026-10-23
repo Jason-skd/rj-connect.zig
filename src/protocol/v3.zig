@@ -3,8 +3,10 @@
 const std = @import("std");
 
 pub const digest_text_len = 128;
+pub const max_input_size = 16 * 1024;
 
 pub const Error = error{
+    InputTooLarge,
     OutputTooSmall,
 };
 
@@ -42,6 +44,9 @@ pub fn digest(
     challenge: [16]u8,
     output: []u8,
 ) Error![]const u8 {
+    if (application_data.len > max_input_size or dll_data.len > max_input_size) {
+        return error.InputTooLarge;
+    }
     if (output.len < digest_text_len) return error.OutputTooSmall;
 
     const c0: i8 = @bitCast(challenge[0]);
@@ -736,13 +741,12 @@ test "V3 digest matches all five fixed modes" {
     }
 }
 
-test "V3 all-byte challenge selects and matches mode three" {
+test "V3 documented input matches mode three" {
     const challenge = [16]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     var output: [128]u8 = undefined;
-    const result = try digest("app-data", "dll-data", challenge, &output);
     try std.testing.expectEqualStrings(
         "717fb3022cecc0abe02fd540f6c7bdfa463fde8812949df7870cd22a82222ad6102c5f9eaf8f27bbb791929374575b13b8a196fcb68ab083eaaa90f1be2ee6e6",
-        result,
+        try digest("app-data", "dll-data", challenge, &output),
     );
 }
 
@@ -763,5 +767,19 @@ test "V3 requires a complete text output buffer" {
     try std.testing.expectError(
         error.OutputTooSmall,
         digest("app-data", "dll-data", @splat(0), &short),
+    );
+}
+
+test "V3 rejects oversized application and DLL inputs" {
+    const oversized: [max_input_size + 1]u8 = @splat(0);
+    var output: [128]u8 = undefined;
+
+    try std.testing.expectError(
+        error.InputTooLarge,
+        digest(&oversized, "dll-data", @splat(0), &output),
+    );
+    try std.testing.expectError(
+        error.InputTooLarge,
+        digest("app-data", &oversized, @splat(0), &output),
     );
 }

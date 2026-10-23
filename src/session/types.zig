@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const eapol = @import("../protocol/eapol.zig");
+const v3 = @import("../protocol/v3.zig");
 
 /// Identifies one authentication attempt. Network frames, timers, and external
 /// results must carry the generation returned by the attempt that requested them.
@@ -64,8 +65,8 @@ pub const PeapConfig = struct {
     pub fn validate(self: PeapConfig) Error!void {
         if (self.v3_application_data.len == 0 or
             self.v3_dll_data.len == 0 or
-            self.v3_application_data.len > max_v3_input_size or
-            self.v3_dll_data.len > max_v3_input_size or
+            self.v3_application_data.len > v3.max_input_size or
+            self.v3_dll_data.len > v3.max_input_size or
             self.service_name_gbk.len > 32 or
             self.alternate_dns_text.len > 247 or
             self.program_name_gbk.len == 0 or
@@ -82,7 +83,6 @@ pub const PeapConfig = struct {
     }
 };
 
-pub const max_v3_input_size = 16 * 1024;
 pub const max_tls_fragment_size = 16 * 1024;
 
 pub const ActivePhase = union(enum) {

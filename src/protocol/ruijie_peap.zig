@@ -44,7 +44,8 @@ pub const BuildError = error{
 };
 
 pub fn encodedSize(info: ClientFields) BuildError!usize {
-    const encrypted_len = crypto.passwordCiphertextSize(info.password_gbk.len);
+    const encrypted_len = crypto.passwordCiphertextSize(info.password_gbk.len) catch
+        return error.InvalidField;
     if (info.program_name_gbk.len > 32 or
         info.service_name_gbk.len > 32 or
         info.alternate_dns.len > 247 or
@@ -110,7 +111,8 @@ pub fn buildClientFields(info: ClientFields, output: []u8) BuildError![]const u8
     if (info.service_name_gbk.len != 0) try writer.field(0x39, info.service_name_gbk);
     if (info.alternate_dns.len != 0) try writer.field(0x76, info.alternate_dns);
 
-    const encrypted_len = crypto.passwordCiphertextSize(info.password_gbk.len);
+    const encrypted_len = crypto.passwordCiphertextSize(info.password_gbk.len) catch
+        return error.InvalidField;
     const password = writer.take(encrypted_len);
     _ = crypto.encryptPassword(
         info.username_gbk,
@@ -296,6 +298,27 @@ test "PEAP compact fields follow the original order and fixed password start" {
     const v3 = (try reader.next()).?;
     try std.testing.expectEqual(@as(u8, 0x60), v3.code);
     try std.testing.expectEqualSlices(u8, &digest, v3.value);
+}
+
+test "empty PEAP password still occupies one ciphertext block" {
+    const info: ClientFields = .{
+        .program_name_gbk = "8021x.exe",
+        .client_version = .{ 1, 33, 1, 2 },
+        .source_mac = .{ 0, 17, 34, 51, 68, 85 },
+        .username_gbk = "alice",
+        .password_gbk = "",
+        .v3_digest = @splat('a'),
+    };
+    var output: [512]u8 = undefined;
+    const encoded = try buildClientFields(info, &output);
+    var reader = vendor.CompactReader.init(encoded);
+
+    while (try reader.next()) |field| {
+        if (field.code != 0x5f) continue;
+        try std.testing.expectEqual(@as(usize, 16), field.value.len);
+        return;
+    }
+    return error.TestExpectedField;
 }
 
 test "server compact fields parse and atomically expose Direct parameters" {

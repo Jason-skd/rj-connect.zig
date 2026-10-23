@@ -123,7 +123,7 @@ mode 0 的中间文本为：
 
 ```text
 MD5vz(app) = 8b9f194d58df330878407f3ff80d2d90
-MD5vz(dll) = 842650e8b7f252df13cc30d11fc02f20
+MD5vz(dll) = 842650e8b7f252df13cc30d116fc02f2
 even_text = 00020406080a0c0e
 odd_text = 01030507090b0d0f
 ```
