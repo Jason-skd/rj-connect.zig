@@ -323,7 +323,64 @@ P + 0x6f + 0x20 * service_count + 0x1b
 | `0x79` | 最高直接通信版本 | `version:u8`    | 能力协商         |
 | `0x80` | 心跳标志         | `u32be`         | 心跳策略         |
 
-> TODO（后续版本可选补齐调查）：Portal、SSO、客户端升级和主机检查的完整业务流程。
+## 服务器驱动的客户端业务
+
+这些字段不改变 802.1X/EAP 或 Direct 的字节协议。它们触发客户端 UI、浏览器、升级器或本机安全
+适配器；实现者必须把它们与认证状态机隔离，避免展示或下载失败反向修改已经完成的认证参数。
+
+### SSO 与登录 URL
+
+服务器字段 `0x68` 是登录 URL，`0x72` 是可信 URL，`0x77` 是展示策略：
+
+```text
+show:u8 || delay_seconds:u16be
+```
+
+认证成功后会尝试展示非空 `0x68`。只有当 `0x72` 非空且 `0x77.show == 1` 时才展示可信 URL；`0x77`
+延迟值按秒解释，客户端在 Linux 上用 `delay_seconds * 1000` 毫秒设置定时器。Linux 1.31 的展示动作是
+在本地消息窗口加入可点击 URL，不会自动把登录状态、令牌或凭据回传到 URL；浏览器导航和会话整合属于
+client。字段缺失或 URL 为空时跳过展示。
+
+### 客户端升级
+
+服务器字段 `0x05` 是四字节最新版本值。Linux 1.31 用高 16 位与本地
+`major << 8 | minor` 比较，只有服务器版本更大时才进入升级流程；字段 `0x37` 是固定 247 字节的下载
+URL 槽，按 NUL 终止文本解释。
+
+当前 Linux 实现只接受 `http://` 或 `ftp://` URL，将反斜线、空格和 `#` 分别编码为 `%5c`、`%20`、
+`%23`，下载文件后交给平台升级器处理。macOS 与 Windows 各有独立的下载/替换实现。升级包格式、
+安装权限、回滚和签名策略是 client 的平台职责；协议层只需保留版本值和 URL，不应自动执行远端内容。
+
+### 主机检查
+
+字段 `0x14` 和 `0x15` 分别控制代理规避和拨号规避，字段 `0x74` 是代理检测类型位图。客户端可据此
+启动本地代理/拨号检测；检测结果通过 EAP 私有字段 `0x62` 的布尔值返回。Windows 还随包提供
+`NetworkDetect.exe` 处理主机检查命令，Linux 1.31 的 `GetHIRusultByLocal()` 是固定返回否的占位
+实现，macOS 则调用本机检查适配器。
+
+现有 EAP 和 SAM/SMP 线格式没有通用的“主机进程列表”“代理详情”或“ACL 规则”容器。SMP 命令
+`0x05`/`0x06` 在 Linux 1.31 和 macOS 1.35 中只释放输入而不解析；Linux 的 `HIPacketUpdate` 只写日志。
+因此 rj-connect 只接受结构化的检查通过/失败结果，不复制平台检查器或推测未观察到的 TLV。
+
+### Windows Portal
+
+Windows 6.85 的 `PortalAuth.dll` 是独立的旧式 Portal 子系统，不属于 802.1X、SAM 或 SMP。它导出
+`StartPortalAuth` 与 `SendLogout`，通过 HTTP 使用以下相对路径：
+
+```text
+eportal/inferface/authAPI/pageInfo
+eportal/inferface/authAPI/login
+eportal/inferface/authAPI/logout
+eportal/inferface/authAPI/getOnlineUserInfo
+```
+
+请求与响应使用 JSON，已确认的字段名包括 `portalUrl`、`selfUrl`、`userip`、`userIndex`、`userId`、
+`password`、`serviceDefault`、`userAgent`、`result`、`message`、`success` 和
+`keepaliveInterval`。具体 portal 地址、字段组合和服务器响应由目标部署决定；该 DLL 不能被用作
+802.1X 私有字段的解析依据。
+
+> 当前 Zig 代码暂不实施：SSO/浏览器导航、客户端升级、主机检查、Portal HTTP 会话和平台安装器。
+> 这些能力由 client 在认证成功后按服务器提示执行；协议库只暴露 URL、版本和检查结果。
 
 ## 服务器字段选择
 

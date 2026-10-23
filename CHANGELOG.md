@@ -15,6 +15,11 @@
 - 修正 macOS EAP-MD5 组帧结论：START、Identity、MD5-Response 和 Logoff 均携带 `0x17`，值为 32 个零字节；`EncapRGVerdorSeg` 的直接调用表不足以排除该字段。
 - 缺失 `0x61` 时，Linux 1.31、macOS 1.35 与 Windows 6.85 均默认选择 SAM `9`，收到字段时才覆盖；目标 macOS Success 实际省略 `0x61`。
 - 静态闭环 Windows Direct 首发送时间戳、三平台计数器及 Linux 超时重发字段保持；目标 macOS 采集实际下发 `0x5a=53`、`0x6e=138`，但未产生 Direct 帧。
+- 补充 EAP 可选方法注册与主认证器分派、Windows EAPHost/WLAN API、macOS CoreWLAN 和 Linux wpa_supplicant 的平台边界。
+- 修正 Direct 版本结论：头版本默认 `1`，Linux/macOS 可把服务器 `0x79` 限制到 `2` 后写入同一 42 字节头；没有发现 v2 专用布局。
+- 恢复 SAM/SMP 命令分派、SMP 改密 TLV、SAM 服务切换、Portal/SSO/升级/主机检查的客户端业务边界。
+- 恢复 PEAPv1/v2、EAP-Payload TLV、Cryptobinding、IPMK/CMK 派生和 Compound MAC 校验规则；PEAP key block 标签为 `client PEAP encryption`。
+- 关闭 `docs/rj-protocol` 原有六条第 4 类 TODO；第 1、2、3 类当前均为空。
 
 ### Limits
 
@@ -24,6 +29,8 @@
 - macOS 1.35 已完成目标认证期采集；该 EAP-MD5 会话未进入 SAM/SMP 发送，Direct 时间戳、计数、重发和心跳仍待服务器实际启动 Direct 的部署验证。
 - Windows 6.85 仍只完成结构级静态复核；目标 provider、运行派生摘要和 Direct 实际值不能由 macOS 采集替代。
 - 目标 macOS EAP-MD5 的 `0x4d` 摘要已观测，但 V3 mode、材料重算关系，以及 PEAP 证书身份和 TLS 水平尚未闭合，当前不能形成完整交付 profile。
+- Direct version 2 尚无已证明的独立线格式；只有目标服务器实际接受相同 42 字节布局的 version 2 时才能启用，否则保持 version 1 或明确失败。
+- Windows 实际 PEAP provider `SuEapPeap.dll` 未随安装材料提供；Portal、主机检查、升级和系统无线接入继续属于 client adapter。
 
 ## v.0.1.0
 

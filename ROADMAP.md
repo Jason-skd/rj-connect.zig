@@ -121,6 +121,7 @@
 - IPv6 三个地址槽的业务语义。
 - V3 输入材料与具体客户端构建、学校部署配置之间的对应关系。
 - 目标 EAP-MD5 会话未进入 Direct 发送；Direct 运行值和 Windows 进程派生 `0x4d`/`0x60` 仍待第 4 类条件。
+- 原六条“后续版本可选补齐调查”TODO 已完成归档；剩余目标 profile、TLS 信任链和 provider 行为属于部署 adapter 与互操作验证。
 
 ## M3: EAP-MD5 确定性协议引擎
 
@@ -247,7 +248,7 @@ pub fn step(
 ### 待验证
 
 - 硬件信息、DHCP 第二认证和心跳字段的最小必需集合。
-- 目标服务器对直接通信最高版本和可选字段的组合要求。
+- 目标服务器对 Direct `0x79` 和可选字段的组合要求；当前仅证明 version 默认 `1`、Linux/macOS 可写入受限的 version `2`，未证明 v2 专用布局。
 - Direct correlation ID 需从原型固定 `session_id` 迁移为库内部按逻辑消息递增，并明确重认证后的重置行为。
 - 原客户端本地端口回退值 `80/8080` 与当前库默认值 `20000` 的兼容策略。
 - SAM `client_ipv4`/`client_mac` 和 SMP `host_disk_serial` 在公开 API 中的正式命名。
@@ -295,7 +296,7 @@ pub fn step(
 
 ### 待验证
 
-- 目标服务器实际协商的 PEAP 版本、TLS 参数和证书信任链。
+- 目标服务器实际协商的 PEAP 版本、TLS 参数和证书信任链；客户端侧 PEAPv1/v2 与 Cryptobinding 机制已完成静态归档，当前 Zig 仍只实现 PEAPv0。
 - `0x5f`、`0x60` 之外服务器可选字段的最小组合。
 - 真实 adapter 对 TLS 分片边界和内部 EAP 包大小的要求。
 - 无服务器 UTC、端口或其他可选字段时，PEAP Direct 应采用的原客户端本地回退值与平台 adapter 责任边界。
