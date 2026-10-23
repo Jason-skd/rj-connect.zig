@@ -72,7 +72,9 @@ client 获取方式：取得用户提供的账户名，按目标协议字段要�
 
 client 获取方式：从用户秘密输入或 client 自有凭据存储取得，转换为本分支要求的 GBK 字节。命令行、环境、交互和存储策略由 client 决定。
 
-> TODO（当前版本待调查）：目标学校客户端选择标准 EAP-MD5 还是锐捷私有 EAP-MD5。选择应形成具名部署 profile，不能由 client 在报文层自行决定。
+Linux 1.31 同时保留标准 EAP-MD5 和锐捷私有 EAP-MD5：标准路径来自内嵌 wpa_supplicant，私有路径由 `CStateMachineThread::txRspAuth` 构造。客户端“包含某条实现”不能证明目标学校实际选择该路径。
+
+> TODO（当前版本待调查）：确认目标学校实际部署请求并使用的 EAP 路径，形成具名部署 profile；不能由 client 在报文层自行切换。
 
 ## 请求与响应分派
 

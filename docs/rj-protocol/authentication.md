@@ -167,7 +167,9 @@ TLS 隧道内按服务器协商结果执行内层认证。锐捷扩展常见路�
 
 client 获取方式：由 client 的 TLS engine 处理服务器 TLS 字节、产生待发送字节，并根据部署 profile 中的 CA、服务器身份和最低 TLS 版本返回验证结果。
 
-> TODO（当前版本待调查）：目标服务器的身份校验采用 DNS 名称、IP 地址还是证书/公钥指纹，以及部署允许的最低 TLS 版本。
+客户端应验证的服务器身份来源可以静态来自部署 profile，但真实校园网使用的 DNS 名称、IP、证书链、公钥指纹和协商 TLS 版本只能从实际 TLS 握手确认。
+
+> TODO（当前版本待调查）：通过目标认证握手确认服务器身份校验策略和最低 TLS 版本。
 
 ### Client 输入：MSCHAPv2
 
@@ -180,13 +182,26 @@ client 获取方式：由 client 的 TLS engine 处理服务器 TLS 字节、产
 
 client 获取方式：由 client 的 MSCHAPv2 provider 使用用户凭据和服务器 challenge 计算响应，并在认证器到达时返回校验结果。
 
-> TODO（当前版本待调查）：MSCHAPv2 provider 对中文密码采用的字符集、Unicode 规范化和 UTF-16LE 转换边界。
+Linux 1.31 内嵌 wpa_supplicant 的 `nt_password_hash` 已静态确认：输入是原始密码字节，最多使用 256 字节；每个字节直接放入一个 UTF-16LE code unit 的低字节，高字节写零。该实现不解码 UTF-8/GBK，不做 Unicode 规范化，也不处理代理项。`mschapv2_derive_response` 将密码指针和长度原样传给该函数。
 
-确定性实现不应自行猜测缺失的服务器值。可由服务器字段、DHCP 结果和本机适配器权威导出的值应在协议层组合；时间起点、是否真实绑定本地端口、TLS 证书策略和平台 I/O 仍由 client adapter 提供。当前原型要求 client 在无服务器 UTC 时显式提供单调起点，并要求提交固定 Direct 配置，这是尚未收口的原型 API，不表示官方客户端没有本地回退值。
+因此中文密码的结果完全取决于 upstream 传入的字节编码；UTF-8 或 GBK 多字节序列都会被逐字节当成独立 UTF-16 code unit。
 
-> TODO（当前版本待调查）：用 rj-connect 内部 profile/strategy 收口 Direct 构造输入，移除原型中要求 client 解释协议语义的固定配置。
+> TODO（当前版本待调查）：确认 macOS 1.35 与 Windows 6.85 的 MSCHAPv2/EAPHost provider 是否采用相同规则。
 
-> TODO（当前版本待调查）：PEAP 路径在服务器 UTC、端口或其他 Direct 可选字段缺失时的目标客户端回退值与具名兼容 profile。
+确定性实现不应自行猜测缺失的服务器值。可由服务器字段、DHCP 结果和本机适配器权威导出的值应在协议层组合；时间起点、是否真实绑定本地端口、TLS 证书策略和平台 I/O 仍由 client adapter 提供。
+
+Direct 构造输入应按下述所有权收口：
+
+- 服务器上下文：RADIUS 服务类型、对端地址和端口、本地端口覆盖、DES key/IV、UTC、心跳和重认证周期。
+- DHCP/适配器事实：IPv4、掩码、网关、DNS 和认证 MAC。
+- 本机软件事实：用户名、主机硬盘序列号、客户端名称、版本和可选安全字段。
+- 平台 I/O：socket 生命周期、TLS provider、本地时钟和 adapter 收发包。
+
+当前原型仍要求 client 提交固定的 Direct 语义配置，这是待修正的实现边界，不是官方客户端没有本地回退值。
+
+Linux 1.31、macOS 1.35 和 Windows 6.85 的 Direct 端口回退均为对端 `8080`、本地 `80`。Linux 在服务器 UTC 缺失时使用本地单调时间模式。
+
+> TODO（当前版本待调查）：确认 PEAP 路径其他可选 Direct 字段缺失时的目标客户端回退值，以及 Windows 时间戳初值。
 
 > 当前 Zig 代码暂不实施：TLS 握手、证书验证、证书读取和 socket 生命周期。client 提交 TLS 字节、建立状态及验证结果。
 

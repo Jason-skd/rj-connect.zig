@@ -59,7 +59,7 @@ Linux 1.31 的 `CDirTranThread` 构造时把两个独立计数器初始化为 `1
 
 原始客户端的 correlation ID 按逻辑消息变化，接收索引不能把它当成整场连接永远不变的 token。实现可以把该字段命名为 `session_id`，但必须明确其实际作用域。
 
-> TODO（当前版本待调查）：当前原型以固定 `DirectSessionConfig.session_id` 发送所有消息，尚未迁移为逻辑消息递增策略。
+Linux 1.31 与 macOS 1.35 的静态调查均确认两个计数器从 `1` 初始化：macOS 的 fragment ID 和 correlation ID 分别位于 `CDirTranThread + 0x688` 和 `+0x6a8`，片段发送和逻辑消息发送路径分别递增。当前 Zig 原型仍通过固定 `DirectSessionConfig.session_id` 发送所有消息，这是待修正的实现差异，不是未决协议语义。
 
 ## 分片标志
 
@@ -175,7 +175,7 @@ SAM 的业务载荷使用单字节 `type` 和单字节 `length`。最小握手�
 
 `01 01 02` 是握手前缀，最后字节 `02` 为握手码。后续字段使用单字节长度 TLV。Linux 1.31 从 DHCP 结果取 `client_ipv4`，从认证适配器取 `client_mac`。两者在 Direct 初始化时确定，不是随机会话参数。
 
-> TODO（当前版本待调查）：把原型 `SamConfig.session_parameter` 与 `endpoint_parameter` 迁移为本机 IPv4 和认证网卡 MAC 的明确字段。
+当前 `SamConfig.session_parameter` 和 `endpoint_parameter` 是早期占位名；协议字段语义已经确认，后续实现应直接命名为 IPv4 和认证网卡 MAC。
 
 ### Client 输入：SAM/SMP 初始身份
 
@@ -202,9 +202,21 @@ client 获取方式：从所选网络接口读取硬件地址，确保它与其�
 
 用途：在 SMP hello 中向服务器提供目标客户端使用的主机磁盘标识。
 
-client 获取方式：从所选系统盘的稳定标识读取。Linux 1.31 客户端提供 `getdiskid` 实现；目标客户端对前缀、长度和字符过滤的精确规则仍按下文 TODO 调查。
+client 获取方式：从所选系统盘的稳定标识读取。
 
-> TODO（当前版本待调查）：Linux 1.31 的 `getdiskid` 在目标系统上如何生成长度、前缀和字符；macOS 1.35 与 Windows 6.85 是否使用同一规则。
+Linux 1.31 的 `getdiskid` 静态实现已经还原：
+
+1. 读取 `/etc/mtab`，按空格切分，选择以 `/` 开头的设备字段。
+2. 删除设备路径末尾连续十进制数字，例如 `/dev/sda1` 转为 `/dev/sda`。
+3. 优先通过 `SG_IO` 的 SATA IDENTIFY 数据取得串号；失败时回退 `HDIO_GET_IDENTITY`。
+4. 串号字段从设备信息偏移 `0x14` 读取，随后删除所有 ASCII 空格。
+5. 不添加固定前缀；成功时把原始串号写入调用方缓冲区，失败返回错误。Linux 客户端传入 64 字节缓冲，`0x54` 编码时最多承载 64 字节。
+
+macOS 1.35 不使用该 Linux 路径。它在应用启动时调用 `/usr/sbin/system_profiler` 的 `SPSerialATADataType`，解析 `Serial Number` 字段，删除空格和换行，并同样限制为 64 字节。
+
+Windows 6.85 的具体串号生成实现仍需核对其 SCSI/系统盘接口；不能根据符号存在推断与 Linux 或 macOS 相同。
+
+> TODO（当前版本待调查）：确认 Windows 6.85 的硬盘串号发现、清理和长度限制规则。
 
 #### `username_gbk`
 
@@ -252,7 +264,7 @@ SMP direct payload 以 4 字节固定头开始：
 
 SMP 的 `0x03` 与 SAM 的 `0x04` 不同：Linux 1.31 从 `tagSmpParaDir.HDSerialNO` 读取硬盘序列号。现有 Zig 公共类型中的 `session_parameter` 是旧占位名，不能据此推断字段来源。
 
-> TODO（当前版本待调查）：把原型 `SmpConfig.session_parameter` 迁移为明确的主机硬盘序列号字段。
+`SmpConfig.session_parameter` 的协议语义已经确认是主机硬盘序列号；后续实现应移除该占位名。
 
 SMP user info 的核心地址字段为：
 
@@ -293,10 +305,12 @@ SMP 路径还会对本地端口创建 UDP bind；确定性库本身只生成完�
 
 服务器 UTC 字段 `0x5e` 非零时，发送时间戳使用服务器时间锚点。缺失或为零时，Linux 1.31 使用本地单调发送序列；该状态的记录从零开始，`GetNextTimeStampForSend` 返回下一个值。
 
-> TODO（当前版本待调查）：macOS 1.35 和 Windows 6.85 是否保持相同的 Direct 计数起点、端口回退和时间戳初值。
+Linux 1.31 和 macOS 1.35 的 Direct fragment/correlation 计数器都从 `1` 开始。macOS 1.35 与 Windows 6.85 的 Direct 参数构造都设置对端端口 `8080`、本地端口 `80`；Windows 还设置片段 ACK 等待 `3000 ms` 和三次发送尝试。
+
+> TODO（当前版本待调查）：确认 Windows 6.85 的 Direct fragment/correlation 初值和无服务器 UTC 时的时间戳初值。
 
 > 存疑线索：根据 Linux 1.31 的零值初始化和递增路径，本地单调模式首个发送时间戳可能是 `1`；当前尚未通过动态观察或固定报文确认。
 
 当前 rj-connect 要求 client 在无服务器 UTC 时显式提供单调起点；`local_udp_port = 20000` 则是当前库的原型默认策略，不是 Linux 1.31 客户端默认值。
 
-> TODO（当前版本待调查）：把本地端口、时间戳起点和 Direct 兼容行为收口为 rj-connect 内部具名 profile，消除原型中的 client 语义配置。
+协议默认值已经明确：Linux、macOS 和 Windows 样本都使用对端 `8080`、本地 `80`；服务器字段 `0x5a`、`0x6e` 覆盖回退值。rj-connect 应把端口、时间戳策略和计数器生命周期收口到内部具名 Direct profile，不应继续要求 client 解释这些协议语义。
