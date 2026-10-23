@@ -57,11 +57,17 @@ Linux 1.31 的 `CDirTranThread` 构造时把两个独立计数器初始化为 `1
 
 同一片段的超时重发保留原 fragment ID、correlation ID、flags、密文、total length、session 参数和端点。一次建立新的 Direct 发送线程后，计数器重新从 `1` 开始。
 
+Linux 1.31 的发送循环在 ACK 超时后回退已提前递增的 fragment ID、恢复输入偏移并按同一片段状态重新发送；
+只重新取得 timestamp 并重算 authenticator。Windows 6.85 与 macOS 1.35 使用相同的片段身份语义。
+
 原始客户端的 correlation ID 按逻辑消息变化，接收索引不能把它当成整场连接永远不变的 token。实现可以把该字段命名为 `session_id`，但必须明确其实际作用域。
 
 macOS 1.35 的 fragment ID 和 correlation ID 分别位于 `CDirTranThread + 0x688` 和 `+0x6a8`，片段发送和逻辑消息发送路径分别递增。Windows 6.85 的 `CDirTranThread` 构造（`0x4a56d0`）同样把 fragment ID `+0x6c4` 和 correlation ID `+0x14cc` 初始化为 `1`；发送路径都是先取当前值，再递增。
 
 三平台因此在计数语义上一致：新 Direct 发送上下文从 `1` 开始，每个新片段取得新的 fragment ID，每条新逻辑消息取得新的 correlation ID。当前 Zig 原型仍通过固定 `DirectSessionConfig.session_id` 发送所有消息，这是待修正的实现差异，不是未决协议语义。
+
+Windows 6.85 的时间戳管理器在 Direct 构造时清空。首次发送以对端 IP/端口查表时尚无记录，返回 `0`；
+服务器响应路径建立记录后，后续发送从 `1` 开始递增。重建 Direct 上下文会重新进入空表状态。
 
 ## 分片标志
 
@@ -320,3 +326,7 @@ Windows 6.85 的 `CDirTranThread` 构造先把时间戳管理器指针 `+0x14c8`
 协议默认值已经明确：Linux、macOS 和 Windows 样本都使用对端 `8080`、本地 `80`；服务器字段 `0x5a`、`0x6e` 覆盖回退值。rj-connect 应把端口、时间戳策略和计数器生命周期收口到内部具名 Direct profile，不应继续要求 client 解释这些协议语义。
 
 > 运行调查（认证后 Direct）：保持认证成功后的当前连接，记录实际首发送时间戳、后续记录建立时点、fragment/correlation 递增和重发复用、UDP 端点与端口回退、缺失 `0x61` 时的 SAM/SMP 选择、心跳/重认证/重连时间线，以及同一 Windows 会话不同消息的 `0x4d`/`0x60`。静态代码已给出候选机制，但这些结论依赖真实会话状态和 socket 行为，不能用离线编码结果替代。
+
+2026-10-24 的 macOS 1.35 目标采集确认服务器把端口覆盖为对端 `53`、本地 `138`，但该 EAP-MD5
+会话在 Success 后的观察窗口内没有产生 Direct UDP 帧。缺失 `0x61` 时的静态选择已经确认是 SAM `9`；
+实际 socket、时间戳、计数器、心跳和重发仍需要在服务器实际启动 Direct 的部署上观察。

@@ -96,11 +96,15 @@ Direct 交接至少组合三类输入：
 
 Linux 1.31 在 authenticated 处理中调用 `StartDirectTrans`，再按 RADIUS 服务类型 `9` 或 `5` 选择 SAM 或 SMP。MentoHUST 的旧 Echo 路径则是另一种部署兼容分支，不能用来否定官方客户端的 Direct 路径，也不能反过来把所有 EAP-MD5 部署都强制成 SAM/SMP。
 
+2026-10-24 的 macOS 1.35 目标 EAP-MD5 会话在 Success 后保持有效地址，但在覆盖 EAPOL、DHCP、
+对端 `202.116.36.42` 和本地端口 `138` 的观察窗口内没有发送 SAM/SMP Direct 帧。因此 Success
+只是潜在触发器；实现不得仅凭 EAP 方法或 Success 推断 Direct 已启动。
+
 > 当前 Zig 代码暂不实施：旧 Echo 心跳兼容分支。当前主线为 SAM/SMP Direct。
 
 ## DHCP 第二认证
 
-DHCP 第二认证只适用于有线 EAP-MD5、锐捷 NAS 和 DHCP 启用同时成立的会话。阶段字段保存为：
+DHCP 第二认证只适用于有线 EAP-MD5、锐捷 NAS 和 DHCP 启用同时成立的会话。Linux 1.31 路径使用以下阶段：
 
 | 阶段 | 含义                              |
 | ---- | --------------------------------- |
@@ -108,7 +112,7 @@ DHCP 第二认证只适用于有线 EAP-MD5、锐捷 NAS 和 DHCP 启用同时�
 | `1`  | 第一次 EAP 已完成，等待 DHCP 地址 |
 | `2`  | 地址已获得，第二次 EAP 即将开始   |
 
-首次 EAP Response 携带私有字段 `0x63=1`。EAP Success 后启动 DHCP 客户端，并每 2 秒检查地址和默认网关。
+Linux 首次 EAP Response 携带私有字段 `0x63=1`。EAP Success 后启动 DHCP 客户端，并每 2 秒检查地址和默认网关。
 
 检查成功的处理顺序如下：
 
@@ -120,6 +124,9 @@ DHCP 第二认证只适用于有线 EAP-MD5、锐捷 NAS 和 DHCP 启用同时�
 6. 第二次 EAP Success 后直接进入 authenticated。
 
 连续 21 次轮询没有同时获得地址和网关时，终止认证并记录 DHCP 获取失败。已经获得地址但缺少网关不得被视为成功。
+
+macOS 1.35 的目标 EAP-MD5 成功响应没有携带 `0x63`，采集窗口内也没有进入第二次 EAP。`0x63`
+不能作为所有平台首轮响应的强制字段；实现必须按实际认证路径解析阶段，不得用 Linux 字段集合替代其他平台。
 
 ### Client 输入：DHCP 租约
 

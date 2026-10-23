@@ -88,7 +88,13 @@ Windows 6.85 的 `Support`/`SupportNum` 已静态定位为配置保存器生成�
 
 三套客户端随包的 `SuConfig.dat` 已静态解码，但学校代码分别不同：Linux 为 `SCNU`，Windows 为 `gznu`，macOS 为 `gyzyu`。Windows 安装配置还包含 `CustomNameEnglish=GZSFDX_DOT1X` 和 EAP Type `25` 的 credential/WLAN profile。它们证明各自制品的定制内容，不能共同指向同一个目标学校。
 
-> 运行调查（认证期）：目标学校实际使用的客户端构建、`SchoolCode`、`AuthMode` 和服务器选择路径必须从断网后启动的一次完整认证交换确认。静态不能唯一确定，因为随包 profile 属于不同部署，服务器也可拒绝客户端首选方法并触发新请求。采集时须保存 START、每个 EAP Request/Response、Success/Failure、对应客户端文件摘要和部署 profile。
+2026-10-24 的 macOS 1.35 目标采集从完整 START 开始记录到 Success。运行配置的 `authmode=1`
+表示 UI 使用的接入模式，不替代 EAP type；服务器选择 MD5-Challenge，客户端以
+`value_size=16` 的原始 MD5 摘要加用户名响应并被接受。该目标部署因此确认走标准形状的 EAP-MD5，
+不是 PEAP。
+
+> 运行调查（认证期）：其他目标部署仍需确认客户端构建、`SchoolCode`、实际 `AuthMode` 和服务器选择路径；
+> 同一客户端也可通过 PEAP 等分支连接。随包 profile 属于不同学校，不能互相替代。
 
 ## 请求与响应分派
 
@@ -142,10 +148,13 @@ proof = MD5(id:u8 || password_bytes || challenge[16])
 响应 data 为：
 
 ```text
-10 proof[16]
+10 proof[16] [name]
 ```
 
-首个字节是值长度 `16`，随后是 16 字节原始摘要，不转换成十六进制文本，也不附加用户名。MentoHUST 的 `checkPass` 走这一分支；Linux 1.31 内嵌的 wpa_supplicant 也保留这一标准路径。
+首个字节是值长度 `16`，随后是 16 字节原始摘要，不转换成十六进制文本。name 是可选用户名尾随材料；
+2026-10-24 的 macOS 1.35 目标认证观测使用了 `value_size=16`、16 字节摘要和用户名，并被服务器接受。
+MentoHUST 的 `checkPass` 走不带 name 的同一摘要分支；Linux 1.31 内嵌的 wpa_supplicant 也保留这一标准路径。
+name 不参与 proof 计算，也不改变 `value_size`。
 
 > 当前 Zig 代码暂不实施：标准 EAP-MD5 profile。现有确定性 `Session` 只实现锐捷私有用户名证明。
 

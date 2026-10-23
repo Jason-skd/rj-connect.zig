@@ -11,14 +11,19 @@
 - 研究范围补充 macOS 1.35 与 Windows 6.85 结构级样本，并明确 V3 材料与客户端构建绑定。
 - 新增协议文档管理原则，使用六类标记区分已证明事实、client 输入、当前待调查、后续可选调查、非当前职责和存疑线索。
 - README 与 ROADMAP 明确 `v0.1.0` 是研究原型；新增 M6 交付边界收口，要求全部协议信息在原定义位置保留状态记录。
+- macOS 1.35 目标认证实测确认服务器选择 EAP-MD5；标准 response 可以由 `value_size=16`、16 字节摘要和可选用户名组成。
+- 修正 macOS EAP-MD5 组帧结论：START、Identity、MD5-Response 和 Logoff 均携带 `0x17`，值为 32 个零字节；`EncapRGVerdorSeg` 的直接调用表不足以排除该字段。
+- 缺失 `0x61` 时，Linux 1.31、macOS 1.35 与 Windows 6.85 均默认选择 SAM `9`，收到字段时才覆盖；目标 macOS Success 实际省略 `0x61`。
+- 静态闭环 Windows Direct 首发送时间戳、三平台计数器及 Linux 超时重发字段保持；目标 macOS 采集实际下发 `0x5a=53`、`0x6e=138`，但未产生 Direct 帧。
 
 ### Limits
 
 - 当前 `DirectSessionConfig.session_id` 仍作为整场固定值发送，尚未复刻 Linux 1.31 的逐逻辑消息递增语义。
 - 当前 `local_udp_port` 默认值 `20000` 是库设计选择，不是原客户端回退值 `80`。
 - 当前 EAP-MD5 确定性路径只实现锐捷私有用户名证明；标准 EAP-MD5 变体尚未进入 `Session`。
-- macOS 1.35 与 Windows 6.85 仅完成结构级浅检，其 Direct 状态与本地回退值仍需逐项验证。
-- V3 材料获取步骤、目标证书身份与 TLS 水平尚未闭合，当前不能形成完整交付 profile。
+- macOS 1.35 已完成目标认证期采集；该 EAP-MD5 会话未进入 SAM/SMP 发送，Direct 时间戳、计数、重发和心跳仍待服务器实际启动 Direct 的部署验证。
+- Windows 6.85 仍只完成结构级静态复核；目标 provider、运行派生摘要和 Direct 实际值不能由 macOS 采集替代。
+- 目标 macOS EAP-MD5 的 `0x4d` 摘要已观测，但 V3 mode、材料重算关系，以及 PEAP 证书身份和 TLS 水平尚未闭合，当前不能形成完整交付 profile。
 
 ## v.0.1.0
 
