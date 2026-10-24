@@ -74,7 +74,7 @@
 - 状态图以 Mermaid 源为权威，使用 Mermaid CLI 重新生成：
 
 ```sh
-mmdc -i docs/rj-protocol/flow_chart.mmd -o docs/rj-protocol/flow_chart.svg --no-font-embed -b white -I rj-client-authentication
+mmdc -i docs/rj-protocol/flow_chart.mmd -o docs/rj-protocol/flow_chart.svg --no-font-embed -b '#0b1220' -I rj-client-authentication
 ```
 
 本机使用自有 Chrome 时，可通过 `-p` 提供 Puppeteer 启动配置。

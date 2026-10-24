@@ -1,12 +1,27 @@
 ---
 config:
-  theme: neutral
+  theme: base
   htmlLabels: false
   deterministicIds: true
   deterministicIDSeed: rj-client-authentication
   themeVariables:
+    darkMode: true
+    background: '#0b1220'
     fontFamily: 'PingFang SC, Noto Sans CJK SC, sans-serif'
-    fontSize: 16px
+    fontSize: 18px
+    primaryColor: '#172b46'
+    primaryTextColor: '#f1f6ff'
+    primaryBorderColor: '#80bfff'
+    secondaryColor: '#242340'
+    tertiaryColor: '#101c2e'
+    lineColor: '#9ecbff'
+    textColor: '#f1f6ff'
+    nodeTextColor: '#f1f6ff'
+    clusterBkg: '#101c2e'
+    clusterBorder: '#526887'
+    titleColor: '#e0f2fe'
+    edgeLabelBackground: '#0b1220'
+    defaultLinkColor: '#9ecbff'
   flowchart:
     htmlLabels: false
     curve: linear
@@ -106,10 +121,12 @@ flowchart TB
     ACTIVE -->|主动停止 / 服务器下线| LOGOFF
     LOGOFF -->|清理完成| DONE
 
-    classDef state fill:#e8eef5,stroke:#334b65,color:#172d43,stroke-width:1.5px
-    classDef decision fill:#f4f6f8,stroke:#617183,color:#172d43
-    classDef success fill:#e9f3ec,stroke:#466f52,color:#24432d,stroke-width:1.5px
-    classDef failure fill:#faf0e4,stroke:#927044,color:#67491f
+    classDef default fill:#172b46,stroke:#80bfff,color:#f1f6ff,stroke-width:2px
+    classDef state fill:#153354,stroke:#70c9ff,color:#f1f6ff,stroke-width:2px
+    classDef decision fill:#2c2446,stroke:#c4a7ff,color:#f5f0ff,stroke-width:2px
+    classDef success fill:#133c32,stroke:#6ee7b7,color:#ecfff6,stroke-width:2px
+    classDef failure fill:#432b20,stroke:#fbbf75,color:#fff4e5,stroke-width:2px
+    linkStyle default stroke:#9ecbff,stroke-width:2px
     class OFF,START,ID,MD5,DONE state
     class METHOD,SECOND,DIRECT,RESULT decision
     class AUTH,ACTIVE success
