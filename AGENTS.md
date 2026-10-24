@@ -138,5 +138,6 @@
 
 ### 版本文档归档
 
-- 已发布 tag 的 `ROADMAP.md` 与 `CHANGELOG.md` 从该 tag 提取到 `docs/archive/<tag>/`，内容须与 tag 中的原文件逐字节一致，归档后冻结。
-- 发布后的结论修订、补充目标和里程碑状态只进入当前开发版本，不回填已发布版本或其里程碑。版本内的变更按实际 commit hash 索引。
+- 每个版本发布后，从发布 tag 提取 `ROADMAP.md` 与 `CHANGELOG.md`，归档至 `docs/archive/<tag>/`；内容须与 tag 中的原文件逐字节一致，归档后冻结。
+- 历史版本文档统一从[归档目录](docs/archive/)查找：`<tag>/ROADMAP.md` 保存该版本的目标、里程碑与验收，`<tag>/CHANGELOG.md` 保存该版本的变化、用法与限制。
+- 仓库根目录的 `ROADMAP.md` 与 `CHANGELOG.md` 只维护当前开发版本的目标、待办和演进；后续修订归入当前版本，变更按实际 commit hash 索引。归档规则与历史文档入口统一在本节维护。

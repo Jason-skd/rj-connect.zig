@@ -2,8 +2,6 @@
 
 ## v0.1.1
 
-当前开发版本，以 `v.0.1.0`（`956dd83`）为基线。版本内按实际提交倒序记录；发布基线中的说明与 M1–M5 保存在[版本归档](docs/archive/v.0.1.0/ROADMAP.md)，后续结论只属于本版本。
-
 ### 66f6c68
 
 - 按 `v.0.1.0` 发布 tag 原样归档 `ROADMAP.md` 与 `CHANGELOG.md`，冻结 M1–M5 及发布时的说明。
@@ -69,7 +67,10 @@
 ### Usage
 
 - 从[研究报告](docs/rj-protocol/index.md)阅读字段与结论，结合[锐捷客户端认证状态机图](docs/rj-protocol/flow_chart.svg)查看路径条件。
-- 包版本为 `0.1.1`。Zig 实例的既有 API 用法见[发布基线说明](docs/archive/v.0.1.0/CHANGELOG.md#usage)；本版本的协议结论修订不表示对应 API 已同步修正。
+- 包版本为 `0.1.1`。通过模块 `rj-connect` 导入，`protocol` 提供无生命周期的 codec，`session.Session` 提供统一会话入口。
+- 启用 PEAP 时，在 `Config` 中允许 `peap` 并提供 `PeapConfig`。TLS 字节通过 `tunnel_input`、`tunnel_output` 交互，MSCHAPv2 计算与校验由外部 provider 完成。
+- 调用方提交当前时间及携带当前 `Generation` 的输入，并根据返回 deadline 驱动定时器。`Outcome` 拥有返回动作和报文字节，消费后调用 `Outcome.deinit`；会话结束时调用 `Session.deinit`。
+- PEAP 成功且完整 DHCP 租约、服务器参数和本地配置齐备后进入 Direct；EAP-MD5 路径通过 `direct_session` 提交 `DirectSessionConfig`。协议报告中的新结论与当前 API 的差异见本页 Limits。
 - 状态图以 Mermaid 源为权威，使用 Mermaid CLI 重新生成：
 
 ```sh
@@ -85,11 +86,3 @@ mmdc -i docs/rj-protocol/flow_chart.mmd -o docs/rj-protocol/flow_chart.svg --no-
 - 目标部署的最小字段集合、V3 材料对应关系、Windows 进程派生机制、PEAP 信任链与非 ASCII 密码行为仍有未决语义。
 - 一个 EAP-MD5 会话的 Success 不构成 Direct 已建立的证明；Direct version 2 的完整互操作范围仍未明确。
 - 离线测试与状态机图不构成所有校园网互操作的保证；具体协议未知项保留在报告原定义位置。
-
-## v.0.1.0
-
-- 发布基线：`956dd83`。
-- [版本说明与发布前提交](docs/archive/v.0.1.0/CHANGELOG.md)：与发布 tag 中的 `CHANGELOG.md` 逐字节一致。
-- [M1–M5 里程碑与验收](docs/archive/v.0.1.0/ROADMAP.md)：与发布 tag 中的 `ROADMAP.md` 逐字节一致。
-
-归档反映发布时的事实与限制；后续修订及目标调整均记录在 v0.1.1，不回填历史快照。
