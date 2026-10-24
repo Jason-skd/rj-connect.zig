@@ -4,6 +4,8 @@
 
 ### Changed
 
+- 协议报告统一为按定义组织的结论性文本，保留六类信息分类；第 5 类使用 `> TODO （后续版本可选实施）` 就地标记。
+- 以报告定义生成锐捷客户端认证状态机图，覆盖 EAP、DHCP、SAM/SMP、心跳与重认证的条件分支；Mermaid 源与 SVG 同步维护。
 - 协议报告区分标准 EAP-MD5 口令证明与锐捷私有用户名证明，并补充各自的固定向量。
 - Direct 文档区分逐消息的 correlation ID 与逐片段的 fragment ID，补充 Linux 1.31 的起始值和重发保持规则。
 - SAM 初始字段明确为本机 IPv4 和 MAC；SMP hello 第二 TLV 明确为硬盘序列号。

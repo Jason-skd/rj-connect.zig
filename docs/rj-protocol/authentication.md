@@ -2,16 +2,17 @@
 title: 认证状态机与 DHCP 第二认证
 description: 定义七个认证状态、两阶段 EAP、网络完成条件和失败转移
 contentType: Reference
-plan: "index.md#文档计划"
 ---
 
 # 认证状态机与 DHCP 第二认证
 
-本页把 EAP 交换、网络完成和会话终止统一为一个状态机。实现者应以状态和会话参数判断事件，不依赖 GUI 提示或日志文本。
+本页定义 EAP 交换、网络完成与会话终止的状态关系。状态由协议事件及会话参数确定。
 
 本页未标记的状态、转移和固定条件属于[第 1 类已证明事实](scope.md#信息分类)。当前时间、输入帧、DHCP 租约和 TLS 结果属于第 2 类 client 输入，用途与获取方式在对应章节就地说明。
 
 ## 状态定义
+
+[完整状态机图](flow_chart.svg)展示 EAP-MD5、PEAP、DHCP 第二认证和 SAM/SMP 的分支关系。下图给出七个主状态的投影；两图均以本页及[直接通信](direct.md)的定义为依据。
 
 | 数值 | 状态           | 含义                                        |
 | ---- | -------------- | ------------------------------------------- |
@@ -40,17 +41,17 @@ stateDiagram-v2
     logoff --> disconnected: cleanup complete
 ```
 
-每次状态切换都必须携带会话代次。旧代次的 EAP 帧、DHCP 定时器和直接通信响应不得推进新状态。
+状态转移仅接受当前会话的事件。已终止会话的 EAP 帧、DHCP 超时与 Direct 响应不推进新会话。
 
 ### Client 输入：当前时间
 
-| 信息  | 布局                             |
-| ----- | -------------------------------- |
-| `now` | 单调不减的绝对时间戳，单位为纳秒 |
+| 信息  | 布局                 |
+| ----- | -------------------- |
+| `now` | 单调不减的本地时间值 |
 
-用途：判断 Start、认证、held、DHCP 轮询和 Direct 结果计时器是否到期，并为旧代次输入提供先后顺序。
+用途：确定 Start、认证、held、DHCP 轮询与 Direct 结果等待的时间边界。
 
-client 获取方式：读取单调时钟或由外部测试驱动的单调时间源，在每次调用 `step` 时传入；同一会话内不得回退。
+client 获取方式：读取本机单调时钟；同一会话内时间不得回退。
 
 ## 初始与连接阶段
 
@@ -86,7 +87,7 @@ acquired 阶段发送 Identity Response。收到 MD5-Challenge Request 时，客
 
 只有网络完成动作成功后才进入 authenticated。EAP Success 本身不证明客户端已经获得可用地址。
 
-标准 EAP Success 只有 code、identifier 和 length，没有 EAP type/data。锐捷扩展可以在 EAPOL 帧后附加私有字段；Linux 1.31 将这些字段解析到独立的 `SuRadiusPrivate` 上下文。Success code 是进入网络完成和 Direct 初始化的触发器，不代表 Direct 端点、key、IV 或服务类型都编码在 Success 的 `code=3` 中。
+标准 EAP Success 只有 code、identifier 和 length，没有 EAP type/data。锐捷扩展可以在 EAPOL 帧后附加私有字段，形成独立于标准 EAP Success 的服务器参数集合。Success code 是进入网络完成和 Direct 初始化的触发器，不代表 Direct 端点、key、IV 或服务类型都编码在 Success 的 `code=3` 中。
 
 Direct 交接至少组合三类输入：
 
@@ -94,13 +95,11 @@ Direct 交接至少组合三类输入：
 2. 本机网络事实，例如 DHCP 得到的 IPv4、掩码、网关、DNS 和认证适配器 MAC。
 3. 本机软件事实，例如用户名、硬盘序列号、版本和可选安全字段。
 
-Linux 1.31 在 authenticated 处理中调用 `StartDirectTrans`，再按 RADIUS 服务类型 `9` 或 `5` 选择 SAM 或 SMP。MentoHUST 的旧 Echo 路径则是另一种部署兼容分支，不能用来否定官方客户端的 Direct 路径，也不能反过来把所有 EAP-MD5 部署都强制成 SAM/SMP。
+Linux 1.31 在 authenticated 阶段按 RADIUS 服务类型 `9` 或 `5` 选择 SAM 或 SMP。MentoHUST 的旧 Echo 路径则是另一种部署兼容分支，不能用来否定官方客户端的 Direct 路径，也不能反过来把所有 EAP-MD5 部署都强制成 SAM/SMP。
 
-2026-10-24 的 macOS 1.35 目标 EAP-MD5 会话在 Success 后保持有效地址，但在覆盖 EAPOL、DHCP、
-对端 `202.116.36.42` 和本地端口 `138` 的观察窗口内没有发送 SAM/SMP Direct 帧。因此 Success
-只是潜在触发器；实现不得仅凭 EAP 方法或 Success 推断 Direct 已启动。
+macOS 1.35 的一个 EAP-MD5 会话在 Success 后保持有效地址，已知交换中不含 SAM/SMP Direct 报文。该结论限于此会话，不能单凭 EAP 方法与 Success 确定 Direct 已启动。
 
-> 当前 Zig 代码暂不实施：旧 Echo 心跳兼容分支。当前主线为 SAM/SMP Direct。
+> TODO （后续版本可选实施）：旧 Echo 心跳兼容分支。
 
 ## DHCP 第二认证
 
@@ -125,8 +124,7 @@ Linux 首次 EAP Response 携带私有字段 `0x63=1`。EAP Success 后启动 DH
 
 连续 21 次轮询没有同时获得地址和网关时，终止认证并记录 DHCP 获取失败。已经获得地址但缺少网关不得被视为成功。
 
-macOS 1.35 的目标 EAP-MD5 成功响应没有携带 `0x63`，采集窗口内也没有进入第二次 EAP。`0x63`
-不能作为所有平台首轮响应的强制字段；实现必须按实际认证路径解析阶段，不得用 Linux 字段集合替代其他平台。
+macOS 1.35 的一组 EAP-MD5 成功交换不携带 `0x63`，且不含第二次 EAP。该字段不是所有平台首轮响应的共同要求。
 
 ### Client 输入：DHCP 租约
 
@@ -155,7 +153,7 @@ client 获取方式：由系统的 DHCP 客户端或网络管理 API 提供当�
 
 ## PEAP 路径
 
-服务器选择 EAP type `25` 时，客户端建立 PEAP 外层 TLS 会话。服务器证书必须通过 client 的部署 profile 和 TLS 适配层验证；认证器不得跳过证书链校验。
+服务器选择 EAP type `25` 时，客户端建立 PEAP 外层 TLS 会话。服务器证书的信任锚与身份约束由部署 profile 确定，认证成功以证书链及身份验证通过为前提。
 
 TLS 隧道内按服务器协商结果执行内层认证。锐捷扩展常见路径使用 MSCHAPv2，用户名和密码由 client 提供。PEAP 的私有字段使用紧凑容器，口令字段 `0x5f` 使用固定起始值，V3 摘要字段 `0x60` 使用与 EAP-MD5 相同的五模式构造。
 
@@ -189,11 +187,11 @@ value    = complete inner EAP packet
 
 PEAPv1 的隧道内 EAP-Success 可以用三种兼容策略结束：
 
-| `peap_outer_success` | 行为 |
-| -------------------- | ---- |
+| `peap_outer_success` | 行为                                  |
+| -------------------- | ------------------------------------- |
 | `0`                  | 收到隧道内 EAP-Success 后立即结束认证 |
-| `1`                  | 再发送一个隧道内 EAP-Success |
-| `2`                  | 发送 PEAP/TLS ACK 完成认证 |
+| `1`                  | 再发送一个隧道内 EAP-Success          |
+| `2`                  | 发送 PEAP/TLS ACK 完成认证            |
 
 Linux 1.31 默认值是 `2`。这里的 Success 处理只属于 PEAP 隧道，不是用外层 EAP Success 跳过内层认证。
 
@@ -205,13 +203,13 @@ TLV 在 TLS 明文中使用 type `0x000c`，PEAPv2 使用带 mandatory 位的 `0
 
 该客户端生成的 TLV value 为：
 
-| 偏移   | 长度 | 值 |
-| ------ | ---- | -- |
-| `0x00` | 1    | `0x00` |
-| `0x01` | 1    | 当前 PEAP version |
-| `0x02` | 1    | 当前 PEAP version |
-| `0x03` | 1    | `0x01`，response subtype |
-| `0x04` | 32   | `binding_nonce` |
+| 偏移   | 长度 | 值                                   |
+| ------ | ---- | ------------------------------------ |
+| `0x00` | 1    | `0x00`                               |
+| `0x01` | 1    | 当前 PEAP version                    |
+| `0x02` | 1    | 当前 PEAP version                    |
+| `0x03` | 1    | `0x01`，response subtype             |
+| `0x04` | 32   | `binding_nonce`                      |
 | `0x24` | 20   | `compound_mac`，计算前为 20 个零字节 |
 
 接收服务器 request TLV 时，客户端要求 value 的偏移 `0x01` 等于协商 PEAP version，偏移 `0x03`
@@ -239,16 +237,13 @@ cmk[20]  = imck[40..60]
 
 接收端使用常量长度检查和完整 HMAC-SHA1 比较；任何 MAC 或 TLV 错误都不得继续内层认证。
 
-### 平台实现边界
+### 平台适用范围
 
-Linux 1.31 内嵌完整 PEAPv0/v1/v2、EAP-Payload TLV 和 Cryptobinding。Windows 6.85 的
-`SuEapPeerPeap32/64.dll` 只是 EAPHost 代理壳，实际 `SuEapPeap.dll` 未包含在现有安装材料中；
-macOS 1.35 将 PEAP/MSCHAPv2 委托给系统 network/security provider。三个平台的 TLS 记录、证书
-验证和用户凭据仍由 client 提供，不能从 Linux 的 in-process 实现外推目标平台 provider。
+Linux 1.31 支持 PEAPv0/v1/v2、EAP-Payload TLV 与 Cryptobinding。Windows 6.85 通过 EAPHost provider 完成 PEAP；macOS 1.35 使用系统 network/security provider。三者的 TLS 与内层认证行为分别受其 provider 约束。
 
-> 当前 Zig 代码暂不实施：TLS 记录处理、PEAP internal EAP 状态机、Cryptobinding 密钥派生和
-> HMAC 校验。若 server 要求 Cryptobinding，而 client 没有提供相应 TLS 导出密钥和内层成功状态，
-> 必须显式失败，不能忽略该 TLV。
+> TODO （后续版本可选实施）：TLS 记录处理、PEAP 内层 EAP 状态、Cryptobinding 密钥派生与 HMAC 校验。
+
+服务器要求 Cryptobinding 时，缺少 TLS 导出密钥或内层认证成功状态均不满足认证条件。
 
 外层 PEAP Success 后，客户端获取 IPv4 地址并启动直接通信。服务器可以在隧道内下发 SAM/SMP 端口、地址、最大版本和其他会话参数；这些参数必须在内层认证完成前保存到独立候选状态。
 
@@ -261,13 +256,11 @@ macOS 1.35 将 PEAP/MSCHAPv2 委托给系统 network/security provider。三个�
 
 用途：推进 PEAP 握手和记录保护；验证结果决定是否允许继续内层认证。
 
-client 获取方式：由 client 的 TLS engine 处理服务器 TLS 字节、产生待发送字节，并根据部署 profile 中的 CA、服务器身份和最低 TLS 版本返回验证结果。
+client 获取方式：TLS provider 处理服务器记录并产生响应，依据部署 profile 中的 CA、服务器身份与最低 TLS 版本给出验证结果。
 
-客户端应验证的服务器身份来源可以静态来自部署 profile，但真实校园网使用的 DNS 名称、IP、证书链、公钥指纹和协商 TLS 版本只能从实际 TLS 握手确认。
+服务器身份约束来自部署 profile；证书链、Subject/SAN、公钥指纹与协商 TLS 版本属于具体服务器会话。Linux 1.31 支持 TLS 1.0 系列协议、`ca_cert`、`ca_path` 与证书链验证，不能由此确定服务器的证书或最终协商版本。
 
-Linux 1.31 的构建事实已经确认：`tls_init` 使用 `TLSv1_method()` 创建 SSL context，并支持 `ca_cert`、`ca_path` 与连接级证书验证回调。该证据证明客户端库具备 TLS 1.0 系列协议能力和 CA 链验证入口，不证明目标服务器实际提供的证书、主机身份字段或最终协商版本。
-
-> 运行调查（认证期）：认证期需记录服务器证书 DER、证书链、Subject/SAN、有效期、指纹和协商 TLS 版本，并由部署方确认信任锚与主机身份规则。静态不能替代这些值，因为证书由目标服务器在握手时提供，客户端构建只证明验证入口和能力。
+> TODO（当前版本待调查）：具体 PEAP 部署的服务器身份、证书信任链与 TLS 协商参数尚未明确。
 
 ### Client 输入：MSCHAPv2
 
@@ -278,38 +271,19 @@ Linux 1.31 的构建事实已经确认：`tls_init` 使用 `TLSv1_method()` 创�
 
 用途：完成隧道内凭据认证，并验证服务器是否持有对应的凭据派生值。
 
-client 获取方式：由 client 的 MSCHAPv2 provider 使用用户凭据和服务器 challenge 计算响应，并在认证器到达时返回校验结果。
+client 获取方式：MSCHAPv2 provider 根据用户凭据与服务器 challenge 计算响应，并校验服务器成功认证器。
 
-Linux 1.31 内嵌 wpa_supplicant 的 `nt_password_hash` 已静态确认：输入是原始密码字节，最多使用 256 字节；每个字节直接放入一个 UTF-16LE code unit 的低字节，高字节写零。该实现不解码 UTF-8/GBK，不做 Unicode 规范化，也不处理代理项。`mschapv2_derive_response` 将密码指针和长度原样传给该函数。
+Linux 1.31 内嵌 wpa_supplicant 的 NT password hash 输入最多为 256 字节。每个原始密码字节成为一个 UTF-16LE code unit 的低字节，高字节为零；不进行 UTF-8/GBK 解码、Unicode 规范化或代理项处理。中文密码的结果因此取决于输入字节编码，UTF-8 或 GBK 多字节序列均逐字节展开。
 
-因此中文密码的结果完全取决于 upstream 传入的字节编码；UTF-8 或 GBK 多字节序列都会被逐字节当成独立 UTF-16 code unit。
+macOS 1.35 使用系统 Security/CoreWLAN provider；Windows 6.85 存在 EAPHost provider 与内部 PEAP 路径。Linux 的密码字节展开规则不代表这两个平台的共同规则。
 
-macOS 1.35 主程序只表明 PEAP 依赖系统 Security/CoreWLAN 能力，未内嵌 `nt_password_hash` 或 MSCHAPv2 provider 实现。Windows 6.85 的 `SuEapPeerPeap32.dll`/`SuEapPeerPeap64.dll` 是 EAPHost 代理壳，通过固定命名管道 `\\.\pipe\RJ_WLAN_PEAR_EAP_METHOD_P_@20110111@` 委托给 `SuEapPeap.dll`；代理 DLL 本身没有直接导入 MD4 或密码哈希实现。
+> TODO（当前版本待调查）：macOS 与 Windows PEAP/MSCHAPv2 的实际 provider 选择、非 ASCII 密码编码及规范化规则尚未明确。
 
-Windows 自解压包、`Setup_x86.zip`、安装归档、`SuInstaller.exe`、`SuInstallerInterface.dll` 和 `8021x.exe` 的命名资源均未提供 `SuEapPeap.dll`。`8021x.exe` 内部另含 `CEapPEAPThread`、MSCHAPv2 路径和 MD4 实现，但静态不能证明目标部署选择这条内部路径而不使用 EAPHost provider。因此不能把 Linux 的逐字节规则外推到 macOS 或 Windows。
+Direct 参数由服务器参数、DHCP 租约、本机网络信息与客户端身份共同确定。端口回退、时间戳和编号规则见[直接通信](direct.md#端口时间戳与本地回退)；可选身份及主机字段见[私有字段布局](private-fields.md)。
 
-> 运行调查（认证期）：在目标 Windows 和 macOS 部署上使用中文密码完成一次 PEAP/MSCHAPv2 认证，记录实际 provider 路径和 UTF-16LE NT password hash 输入材料；Windows 若在安装目录找到 `SuEapPeap.dll`，须先按 SHA-256 绑定版本并静态复核，再做认证期验证。静态不能唯一确定，因为 Windows 实际 provider 缺失，macOS 实现在系统框架内，且两条路径的字符集和规范化行为都不可由主程序推定。
+> TODO（当前版本待调查）：各 PEAP 部署要求的客户端名称、版本、IPv6、安全域及其他可选字段的最小集合尚未明确。
 
-确定性实现不应自行猜测缺失的服务器值。可由服务器字段、DHCP 结果和本机适配器权威导出的值应在协议层组合；时间起点、是否真实绑定本地端口、TLS 证书策略和平台 I/O 仍由 client adapter 提供。
-
-Direct 构造输入应按下述所有权收口：
-
-- 服务器上下文：RADIUS 服务类型、对端地址和端口、本地端口覆盖、DES key/IV、UTC、心跳和重认证周期。
-- DHCP/适配器事实：IPv4、掩码、网关、DNS 和认证 MAC。
-- 本机软件事实：用户名、主机硬盘序列号、客户端名称、版本和可选安全字段。
-- 平台 I/O：socket 生命周期、TLS provider、本地时钟和 adapter 收发包。
-
-当前原型仍要求 client 提交固定的 Direct 语义配置，这是待修正的实现边界，不是官方客户端没有本地回退值。
-
-Linux 1.31、macOS 1.35 和 Windows 6.85 的 Direct 端口回退均为对端 `8080`、本地 `80`。Linux 在服务器 UTC 缺失时使用本地单调时间模式。
-
-Windows 6.85 的 Direct 时间戳管理器创建时使用空表；空表查询返回 `0`，已有记录首次递增后的值为 `1`。其 `0x55` 编码器固定返回空值，`0x64` 只在 IPD 客户端检测状态成立时发送固定 `00 01`，其他字段的生成条件已按平台记录在[私有字段布局](private-fields.md)。这些静态结论仍不等于目标服务器要求的最小字段集合。
-
-> 运行调查（认证期）：认证期记录目标 PEAP 路径实际发送的 `0x17`、`0x39`、`0x55`、`0x64`、客户端名称/版本和 IPv6 字段，以及服务器返回的私有参数；再用成功与拒绝结果确认最小必需集合。静态不能唯一确定，因为各平台编码器提供的是可选发送机制，服务器接受策略属于目标部署。
-
-> 当前 Zig 代码暂不实施：TLS 握手、证书验证、证书读取和 socket 生命周期。client 提交 TLS 字节、建立状态及验证结果。
-
-> 当前 Zig 代码暂不实施：MSCHAPv2 密码学计算和成功认证器校验。client 负责计算并返回结构化结果。
+> TODO （后续版本可选实施）：TLS 握手与证书验证，以及 MSCHAPv2 密码学计算与成功认证器校验。
 
 ## Held 与重试
 

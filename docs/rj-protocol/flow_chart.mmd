@@ -1,0 +1,116 @@
+---
+config:
+  theme: neutral
+  htmlLabels: false
+  deterministicIds: true
+  deterministicIDSeed: rj-client-authentication
+  themeVariables:
+    fontFamily: 'PingFang SC, Noto Sans CJK SC, sans-serif'
+    fontSize: 16px
+  flowchart:
+    htmlLabels: false
+    curve: linear
+    nodeSpacing: 30
+    rankSpacing: 40
+    wrappingWidth: 220
+---
+flowchart TB
+    accTitle: 锐捷客户端认证状态机
+    accDescr: 按报告中的 EAP、DHCP 与 SAM/SMP 定义归纳认证、网络完成、心跳、重认证及下线。回到 connecting 或 acquired 的连接点表示重新进入同名状态；可选路径由部署决定，EAP Success 不表示 Direct 已启动。
+
+    OFF([disconnected])
+
+    subgraph EAP[认证交换]
+        START[connecting<br/>发送 EAPOL Start]
+        ID[acquired<br/>发送 Identity Response]
+        METHOD{服务器选择的 EAP 方法}
+        MD5[authenticating<br/>接收 MD5-Challenge]
+        PROOF[标准口令证明<br/>或锐捷私有用户名证明]
+        TLS[PEAP 版本协商与 TLS 握手<br/>证书链及服务器身份验证]
+        INNER[隧道内 EAP 认证<br/>常见方法为 MSCHAPv2]
+        BIND[验证内层成功认证器<br/>按协商要求验证 Cryptobinding]
+        OTHER[按客户端支持的方法处理<br/>不支持时返回 NAK]
+        SUCCESS[EAP 方法成功]
+
+        START -->|Request / Identity| ID
+        ID --> METHOD
+        METHOD -->|type 4| MD5
+        MD5 --> PROOF
+        PROOF -->|EAP Success| SUCCESS
+        METHOD -->|type 25| TLS
+        TLS -->|验证通过| INNER
+        INNER --> BIND
+        BIND -->|内层与外层认证成功| SUCCESS
+        METHOD -->|其他方法| OTHER
+        OTHER -->|方法成功| SUCCESS
+    end
+
+    subgraph NETWORK[网络完成]
+        SECOND{首次有线 EAP-MD5<br/>且锐捷 NAS、DHCP 均启用？}
+        DHCP[获取 DHCP 地址及默认网关<br/>每 2 秒检查，最多 21 次]
+        AGAIN([阶段改为 2<br/>重新进入 connecting<br/>第二次响应携带 0x63=2])
+        ADDRESS[完成本路径的地址确认<br/>需要时取得完整 IPv4 信息]
+        DIRECT{本路径是否启动 Direct？}
+        AUTH[authenticated<br/>本路径网络完成]
+
+        SECOND -->|是，阶段 1| DHCP
+        DHCP -->|地址和网关有效| AGAIN
+        SECOND -->|否，或第二次 EAP 已完成| ADDRESS
+        ADDRESS --> DIRECT
+        DIRECT -->|否| AUTH
+    end
+
+    subgraph SESSION[SAM/SMP 直接通信]
+        MODE[按服务器参数选择协议<br/>0x61=9：SAM；0x61=5：SMP<br/>字段缺失时默认 SAM]
+        HELLO[SAM/SMP 初始握手<br/>组合服务器参数与本机身份]
+        INFO[发送用户与地址信息]
+        RESULT{9 秒内的 DHCP 认证结果}
+        ACTIVE[authenticated<br/>SAM/SMP 会话有效]
+        HEART[按服务器周期维持心跳<br/>每条消息使用新的关联 ID]
+        REAUTH([结束旧 Direct 会话<br/>重置计数与关联状态<br/>重新进入 connecting])
+
+        MODE --> HELLO
+        HELLO --> INFO
+        INFO --> RESULT
+        RESULT -->|成功| ACTIVE
+        ACTIVE --> HEART
+        HEART -->|会话继续| ACTIVE
+        HEART -->|重认证周期到期<br/>或 SMP hello 连续 3 次失败| REAUTH
+    end
+
+    HELD[held<br/>退避等待]
+    RETRY([允许重试<br/>重新进入 connecting])
+    ID_AGAIN([challenge 仍有效<br/>重新进入 acquired])
+    LOGOFF[logoff<br/>停止定时与会话，清除密钥和分片<br/>发送适用的 EAPOL Logoff]
+    DONE([disconnected])
+
+    OFF -->|发起认证| START
+    SUCCESS --> SECOND
+    DIRECT -->|是| MODE
+    START -->|Start 超时，未达上限| START
+    START -. 重试耗尽 .-> HELD
+    PROOF -. 再次请求 Identity .-> ID_AGAIN
+    PROOF -. Failure / 认证超时 .-> HELD
+    TLS -. 验证失败 / 超时 .-> HELD
+    INNER -. 凭据失败 / 超时 .-> HELD
+    BIND -. 校验失败 .-> HELD
+    OTHER -. 协商失败 .-> HELD
+    HELD -->|退避结束，可重试| RETRY
+    HELD -->|有效 challenge| ID_AGAIN
+    HELD -->|达到失败上限| LOGOFF
+    DHCP -. 轮询失败 .-> LOGOFF
+    ADDRESS -. 地址获取失败 .-> LOGOFF
+    HELLO -. 初始化失败 .-> LOGOFF
+    RESULT -->|拒绝 / 无有效结果 / 超时| LOGOFF
+    AUTH -->|停止 / 会话终止| LOGOFF
+    ACTIVE -->|主动停止 / 服务器下线| LOGOFF
+    LOGOFF -->|清理完成| DONE
+
+    classDef state fill:#e8eef5,stroke:#334b65,color:#172d43,stroke-width:1.5px
+    classDef decision fill:#f4f6f8,stroke:#617183,color:#172d43
+    classDef success fill:#e9f3ec,stroke:#466f52,color:#24432d,stroke-width:1.5px
+    classDef failure fill:#faf0e4,stroke:#927044,color:#67491f
+    class OFF,START,ID,MD5,DONE state
+    class METHOD,SECOND,DIRECT,RESULT decision
+    class AUTH,ACTIVE success
+    class HELD,LOGOFF failure
