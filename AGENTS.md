@@ -136,3 +136,7 @@
 - 只在本校或特定客户端版本观察到的行为可以形成具名兼容 profile，但必须记录证据、适用范围和退出边界。
 - [协议文档管理原则](docs/rj-protocol/scope.md)与[研究报告入口](docs/rj-protocol/index.md)共同管理 `docs/prototype`（当前仓库路径为 `docs/rj-protocol`）；协议信息的分类与放置位置以这两个文件为准。
 
+### 版本文档归档
+
+- 已发布 tag 的 `ROADMAP.md` 与 `CHANGELOG.md` 从该 tag 提取到 `docs/archive/<tag>/`，内容须与 tag 中的原文件逐字节一致，归档后冻结。
+- 发布后的结论修订、补充目标和里程碑状态只进入当前开发版本，不回填已发布版本或其里程碑。版本内的变更按实际 commit hash 索引。

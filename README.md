@@ -12,7 +12,7 @@ RJ Connect 是一个研究 Ruijie（锐捷）校园网认证协议的技术性�
 
 `src/` 中的 Zig 代码提供对研究成果的一次实例复刻，以确定性协议引擎演示字段编解码、EAP-MD5 与 PEAPv0 编排、DHCP 衔接和 SAM/SMP 心跳生命周期；离线测试用于核对复刻行为与研究向量。网络 I/O、时钟、随机数、TLS、证书验证、MSCHAPv2 计算和系统适配由 client 提供。
 
-当前 `v0.1.0` 是研究原型，不是交付契约。rj-connect 负责协议语义、字段来源、编号生成、状态转移和校验；client 只提供运行事实、外部能力、部署 profile 和用户凭据。client 如何取得或组织这些值不属于本库 interface 的约束。
+当前开发版本为 `v0.1.1`；已发布的 `v.0.1.0` 及其 M1–M5 已按 tag 归档。Zig 实例仍是研究原型，交付边界见 ROADMAP。rj-connect 负责协议语义、字段来源、编号生成、状态转移和校验；client 只提供运行事实、外部能力、部署 profile 和用户凭据。client 如何取得或组织这些值不属于本库 interface 的约束。
 
 ## 快速开始
 
@@ -37,7 +37,7 @@ var outcome = try session.step(now, .start);
 defer outcome.deinit(allocator);
 ```
 
-`protocol` 提供无会话生命周期的 codec 与密码学原语，`session` 提供统一的 `Session` 生命周期入口。配置、动作所有权、异步事件和已知限制见 [v.0.1.0 使用说明](CHANGELOG.md#v010)。
+`protocol` 提供无会话生命周期的 codec 与密码学原语，`session` 提供统一的 `Session` 生命周期入口。配置、动作所有权、异步事件和已知限制见 [v0.1.1 使用说明](CHANGELOG.md#v011)。
 
 ## 开发验证
 
@@ -56,7 +56,8 @@ zig build test
 - [协议文档管理原则](docs/rj-protocol/scope.md)：协议信息的六类分类和原地标记规则。
 - [锐捷客户端认证状态机图](docs/rj-protocol/flow_chart.svg)：根据协议报告归纳 EAP、DHCP、SAM/SMP、心跳与重认证分支。
 - [ROADMAP.md](ROADMAP.md)：成品目标、里程碑、验收条件与待确认项。
-- [CHANGELOG.md](CHANGELOG.md)：版本变化、Zig 复刻使用方法与重要限制。
+- [CHANGELOG.md](CHANGELOG.md)：按版本和提交索引变化、使用方法与重要限制。
+- [v.0.1.0 归档](docs/archive/v.0.1.0/ROADMAP.md)：发布时的 M1–M5 原始快照。
 - [GLOSSARY.md](GLOSSARY.md)：认证、直接通信和会话生命周期术语。
 
 License: [MIT](LICENSE)
