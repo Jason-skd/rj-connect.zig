@@ -79,6 +79,14 @@ password_bytes = "secret"
 3f2482ac a4ee88d8 4b37358a caff122a
 ```
 
+EAP-MD5 无 challenge 时的起始值为 16 个零字节。相同的 `username_bytes` 与 `password_bytes`（`alice` / `secret`）得到初始密文：
+
+```text
+44bc4e8f 731e1a4b 428774cc 666e1789
+```
+
+该值是尾块 `0x2f` 在 challenge 前的默认值；收到 challenge 后改用 challenge 为起始值重算。
+
 ## RC4
 
 公开已知答案：

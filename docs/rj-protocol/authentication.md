@@ -285,9 +285,9 @@ macOS 1.35 使用系统 Security/CoreWLAN provider；Windows 6.85 存在 EAPHost
 
 Direct 参数由服务器参数、DHCP 租约、本机网络信息与客户端身份共同确定。端口回退、时间戳和编号规则见[直接通信](direct.md#端口时间戳与本地回退)；可选身份及主机字段见[私有字段布局](private-fields.md)。
 
-目标 macOS 1.35 部署的 EAP-MD5 交换确认了实际客户端字段集合（按实测尾块顺序）：`0x17`、`0x18`、`0x2d`、`0x2f`、`0x35`、`0x36`、`0x38`、`0x4e`、`0x4d`、`0x39="students"`、`0x54`、`0x76`、`0x62`、`0x70`、`0x6f`、`0x79`；未发送 `0x55`、`0x64`。逐帧差异：`0x4d` 在 challenge 前为 128 个零字节、之后为 V3 摘要；`0x2f` 在无 challenge 时为固定初始值、保留 challenge 时为该 challenge 的密文；`0x62` 在 MD5-Response 为 `1`。这一集合只属于该 EAP-MD5 部署，不能外推到 PEAP 部署的最小字段集合。
+目标 macOS 1.35 部署的 EAP-MD5 交换确认了实际客户端字段集合（按实测尾块顺序）：`0x17`、`0x18`、`0x2d`、`0x2f`、`0x35`、`0x36`、`0x38`、`0x4e`、`0x4d`、`0x39="students"`、`0x54`、`0x76`、`0x62`、`0x70`、`0x6f`、`0x79`；未发送 `0x55`、`0x64`。逐帧差异：`0x4d` 在 challenge 前为 128 个零字节、之后为 V3 摘要；`0x2f` 无 challenge 时为零 IV 口令链的当前保留值，收到 challenge 后重算并保留；`0x62` 在 MD5-Response 为 `1`。这一集合只属于该 EAP-MD5 部署，不能外推到 PEAP 部署的最小字段集合。
 
-> TODO（当前版本待动态调查）：`0x2f` 初始值的链式 IV 与口令复算，以及 `0x2f` 在保留 challenge 与初始值之间切换的条件。
+> TODO（当前版本待动态调查）：`0x2f` 保留值复位为零 IV 默认值的触发条件。
 >
 > TODO（待 client 上线联调）：目标字段集合能否裁剪、属性顺序是否影响接受，以及各 PEAP 部署要求的最小集合；目标部署未进入 PEAP，PEAP 最小集合不属于当前版本实践范围。
 

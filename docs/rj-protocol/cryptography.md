@@ -49,9 +49,11 @@ ci = Pi XOR mi
 
 PEAP 固定起始值长度为 16，不带 NUL。
 
-EAP-MD5 路径在 challenge 之前不重新计算口令链：目标客户端在无 challenge 时发送固定初始密文，保留 challenge 时沿用该 challenge 对应的密文，收到新 challenge 后才重算。2026-10-25 的冷启动复核确认初始值在失败重试后重复，不是随机值；该初始值对应的 IV 与口令链输入尚未复算确认。
+EAP-MD5 路径在无 challenge 时以 16 个零字节为起始值，即 `c0 = P0 XOR MD5(username_bytes || 0^16)`；收到 challenge 后改用该 challenge 为起始值重算。初始密文由用户名与口令决定，不是构建内嵌常量。客户端在收到 challenge 后保留该密文，后续无 challenge 的 Start、Identity 与 Logoff 帧复用它；观测到部分失败重试回到零 IV 默认值，复位触发条件尚未确定。
 
-> TODO（当前版本待动态调查）：`0x2f` 初始值的链式 IV 与口令复算。
+2026-10-25 的差分复核在不知道口令的情况下关闭了 IV 问题：同一次认证的 challenge 前值 `pre` 与 challenge 后值 `post` 使用相同口令块 `P0`，于是 `MD5(U || IV_pre) = pre XOR post XOR MD5(U || challenge)`。三份采集的 9 次交换中，3 次 challenge 前默认值与 `MD5(U || 0^16)` 一致；4 组 `pre` 等于上一帧 `post` 的相邻交换，其值与 `MD5(U || 上一次 challenge)` 一致。
+
+> TODO（当前版本待动态调查）：`0x2f` 保留值复位为零 IV 默认值的触发条件。
 >
 > TODO（待 client 上线联调）：服务器是否校验 challenge 前帧中的 `0x2f`；将其置零或省略是否仍可通过认证。
 

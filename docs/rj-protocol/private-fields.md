@@ -107,7 +107,7 @@ CRC-16 覆盖前 21 字节，参数为多项式 `0x1021`、初值 `0`、不反�
 | 1    | `0x17` | 32 字节零值               | 固定发送                              |
 | 2    | `0x18` | `dhcp_auth_enabled:u32be` | 固定发送，目标样本为 `1`              |
 | 3    | `0x2d` | `mac[6]`                  | 固定发送                              |
-| 4    | `0x2f` | 链式 MD5 口令密文         | 固定发送；无 challenge 时为初始值    |
+| 4    | `0x2f` | 链式 MD5 口令密文         | 固定发送；无 challenge 时为当前口令的零 IV 链初始值 |
 | 5    | `0x35` | `aux_state:u8`            | 固定发送；目标样本 count 为 `0` 或 `5` |
 | 6    | `0x36` | `ipv6_addr[16]`           | 固定发送；目标部署始终为全零          |
 | 7    | `0x38` | `ipv6_addr[16]`           | 固定发送；Start/Logoff 为零           |
@@ -134,16 +134,16 @@ V3 摘要与 `0x4d` 的关系见[密码学与 V3 摘要](cryptography.md)。口�
 | 观测项                | 观测结果                                                                                       |
 | --------------------- | ---------------------------------------------------------------------------------------------- |
 | `0x4d`                | Start、Identity、Logoff 为 128 个零字节；MD5-Response 为当前 challenge 对应的 V3 摘要          |
-| `0x2f`                | 无 challenge 时为固定初始值；保留 challenge 时为该 challenge 的密文；MD5-Response 用当前 challenge 计算 |
+| `0x2f`                | 无 challenge 时为当前保留值（初始为零 IV 链结果）；收到 challenge 后重算并保留该 challenge 的密文；MD5-Response 用当前 challenge 计算 |
 | `0x62`                | Start、Identity、Logoff 为 `0`；MD5-Response 为 `1`                                            |
 | `0x35` 与 IPv6 地址槽 | Start、Logoff 的 count 为 `0` 且地址全零；Identity、Response 为认证网卡当时地址，`0x36` 始终为零 |
 | 其余字段              | `0x17`、`0x18`、`0x2d`、`0x39`、`0x54`、`0x70`、`0x6f`、`0x79` 与会话无关或缓慢变化            |
 
 固定前缀中的 legacy DHCP info 在上述四个帧中相同，其 IP、掩码、网关与 DNS 为认证网卡当时的租约事实，传送前经过 property 变换。
 
-2026-10-25 的冷启动复核确认：完全重启客户端后，challenge 前的 Start 帧使用固定初始 `0x2f`，失败重试后的 Start 仍为同一值；收到 challenge 后才重算，后续 Identity/Logoff 携带当前值。Start/Identity 尾块因此按当前状态构造，不是复用上一帧缓冲。`0x2f` 初始值对应的链式 IV 与口令输入尚未复算确认。
+2026-10-25 的冷启动复核与差分复算确认：challenge 前的 `0x2f` 是**零 IV 口令链**结果（`P0 XOR MD5(username_bytes || 0^16)`），由用户名与口令决定；收到 challenge 后以 challenge 为 IV 重算，并把结果保留给后续无 challenge 的 Start、Identity 与 Logoff 帧。Start/Identity 尾块按当前状态构造，不是复用上一帧的完整缓冲；其中 `0x2f` 复用保留的链值。观测到部分失败重试回到零 IV 默认值，复位条件尚未确定。
 
-> TODO（当前版本待动态调查）：`0x2f` 初始值的链式 IV 与口令复算；`0x2f` 在保留 challenge 与初始值之间切换的条件。
+> TODO（当前版本待动态调查）：`0x2f` 保留值复位为零 IV 默认值的触发条件。
 >
 > TODO（待 client 上线联调）：服务器是否校验 challenge 前尾块中的 `0x2f`、`0x4d`、`0x62`；将 challenge 前 `0x2f` 置零或省略尾块是否仍可通过认证。
 
