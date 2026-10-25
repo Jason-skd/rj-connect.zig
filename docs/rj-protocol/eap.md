@@ -79,8 +79,8 @@ EAP body 从 EAPOL 偏移 `0x12` 开始。
 
 尾块总长 566 字节，由 70 字节固定前缀和 496 字节 `0x1a` 包装属性组成；字段布局、顺序与逐帧取值见[锐捷私有字段](private-fields.md#eap-md5-私有尾块)。表中的 EAP length `16` 与 `33` 是目标部署用户名长度为 11 字节时的实际值；尾块长度固定，帧总长随 EAP 载荷长度变化。目标服务器接受该形状。
 
-> TODO（当前版本待动态调查）：Start 与 Identity 尾块是按当前状态重新构造，还是复用上一次 Response 的缓冲内容。
->
+2026-10-25 的冷启动复核显示，尾块按当前状态构造：challenge 前 `0x2f` 为固定初始值、`0x4d` 为全零，失败重试后的 Start 仍为同一初始值；不是复用上一帧的缓冲内容。
+
 > TODO（待 client 上线联调）：服务器是否要求 Start、Identity 与 Logoff 携带尾块，以及省略尾块或使用冷启动取值时能否完成认证。
 
 ### Client 输入：身份与凭据
@@ -120,7 +120,7 @@ Windows 6.85 的 `Support`/`SupportNum` 分别表示能力位图和能力数量�
 
 macOS 1.35 的一个部署使用标准形状的 EAP-MD5：服务器选择 MD5-Challenge，客户端以 `value_size=16`、16 字节原始摘要和用户名响应，服务器返回 Success。其 `authmode=1` 表示接入模式，不等同于 EAP type。
 
-目标 macOS 1.35 部署在 2026-10-24 的两轮采集中共完成 7 次 MD5-Challenge/Response，服务器始终选择 EAP-MD5，未出现 PEAP/EAP-TLS 帧或 TLS 记录。该部署的运行时 profile 为 `authmode=1`、`service=students`、`adapter=en7`；目标安装目录没有随包 `SuConfig_new.ini`，运行时 profile 不含 `SchoolCode`，macOS 客户端在 EAP-MD5 交换中也不发送学校代码。随包样本的 `SCNU`、`gznu`、`gyzyu` 属于不同学校定制，不能作为目标部署名称证据。
+目标 macOS 1.35 部署在 2026-10-24 的两轮采集和 2026-10-25 的冷启动采集中共完成 9 次 MD5-Challenge/Response，服务器始终选择 EAP-MD5，未出现 PEAP/EAP-TLS 帧或 TLS 记录。该部署的运行时 profile 为 `authmode=1`、`service=students`、`adapter=en7`；目标安装目录没有随包 `SuConfig_new.ini`，运行时 profile 不含 `SchoolCode`，macOS 客户端在 EAP-MD5 交换中也不发送学校代码。随包样本的 `SCNU`、`gznu`、`gyzyu` 属于不同学校定制，不能作为目标部署名称证据。
 
 > TODO（后续版本可选补齐调查）：其他部署的学校配置、`AuthMode` 与服务器实际选择的 EAP 方法之间的对应关系，以及目标 Windows 部署的学校配置与具名 profile；macOS 目标部署只确认了运行时 `authmode=1` 与服务器选择的 EAP-MD5，其余需要其他部署或 Windows 运行时资料，不属于当前版本实践范围。
 

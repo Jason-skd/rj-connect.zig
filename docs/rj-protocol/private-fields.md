@@ -107,7 +107,7 @@ CRC-16 覆盖前 21 字节，参数为多项式 `0x1021`、初值 `0`、不反�
 | 1    | `0x17` | 32 字节零值               | 固定发送                              |
 | 2    | `0x18` | `dhcp_auth_enabled:u32be` | 固定发送，目标样本为 `1`              |
 | 3    | `0x2d` | `mac[6]`                  | 固定发送                              |
-| 4    | `0x2f` | 链式 MD5 口令密文         | 固定发送；challenge 前沿用上次结果    |
+| 4    | `0x2f` | 链式 MD5 口令密文         | 固定发送；无 challenge 时为初始值    |
 | 5    | `0x35` | `aux_state:u8`            | 固定发送；目标样本 count 为 `0` 或 `5` |
 | 6    | `0x36` | `ipv6_addr[16]`           | 固定发送；目标部署始终为全零          |
 | 7    | `0x38` | `ipv6_addr[16]`           | 固定发送；Start/Logoff 为零           |
@@ -134,14 +134,16 @@ V3 摘要与 `0x4d` 的关系见[密码学与 V3 摘要](cryptography.md)。口�
 | 观测项                | 观测结果                                                                                       |
 | --------------------- | ---------------------------------------------------------------------------------------------- |
 | `0x4d`                | Start、Identity、Logoff 为 128 个零字节；MD5-Response 为当前 challenge 对应的 V3 摘要          |
-| `0x2f`                | Start、Identity、Logoff 沿用上一次 MD5-Response 的密文；MD5-Response 用当前 challenge 重新计算 |
+| `0x2f`                | 无 challenge 时为固定初始值；保留 challenge 时为该 challenge 的密文；MD5-Response 用当前 challenge 计算 |
 | `0x62`                | Start、Identity、Logoff 为 `0`；MD5-Response 为 `1`                                            |
 | `0x35` 与 IPv6 地址槽 | Start、Logoff 的 count 为 `0` 且地址全零；Identity、Response 为认证网卡当时地址，`0x36` 始终为零 |
 | 其余字段              | `0x17`、`0x18`、`0x2d`、`0x39`、`0x54`、`0x70`、`0x6f`、`0x79` 与会话无关或缓慢变化            |
 
 固定前缀中的 legacy DHCP info 在上述四个帧中相同，其 IP、掩码、网关与 DNS 为认证网卡当时的租约事实，传送前经过 property 变换。
 
-> TODO（当前版本待动态调查）：冷启动（进程内尚无任何 challenge 结果）时 `0x2f`、IPv6 槽与 `0x62` 的取值，以及 Start/Identity 尾块是重新构造还是复用上一次 Response 的缓冲。
+2026-10-25 的冷启动复核确认：完全重启客户端后，challenge 前的 Start 帧使用固定初始 `0x2f`，失败重试后的 Start 仍为同一值；收到 challenge 后才重算，后续 Identity/Logoff 携带当前值。Start/Identity 尾块因此按当前状态构造，不是复用上一帧缓冲。`0x2f` 初始值对应的链式 IV 与口令输入尚未复算确认。
+
+> TODO（当前版本待动态调查）：`0x2f` 初始值的链式 IV 与口令复算；`0x2f` 在保留 challenge 与初始值之间切换的条件。
 >
 > TODO（待 client 上线联调）：服务器是否校验 challenge 前尾块中的 `0x2f`、`0x4d`、`0x62`；将 challenge 前 `0x2f` 置零或省略尾块是否仍可通过认证。
 
@@ -220,7 +222,7 @@ client 获取方式：Linux 1.31 与 macOS 1.35 使用对应客户端构建内�
 
 Windows 6.85 的 `0x4d` 与 `0x60` 均由 16 字节运行时种子、当前进程模块信息及其他输入共同派生，结果长 128 字节；不能以固定 `A`/`D` 数组替代。
 
-目标 macOS 1.35 部署的 7 个 `(challenge, 0x4d)` 运行值已用内置材料复算，全部逐字节一致，覆盖 mode `0`、`2`、`3`、`4`；材料与模式的细节见[密码学与 V3 摘要](cryptography.md#v3-材料)。
+目标 macOS 1.35 部署累计 9 个 `(challenge, 0x4d)` 运行值已用内置材料复算，全部逐字节一致，覆盖 mode `0`、`2`、`3`、`4`；材料与模式的细节见[密码学与 V3 摘要](cryptography.md#v3-材料)。
 
 > TODO（后续版本可选补齐调查）：Windows 运行时材料与摘要的完整生成关系需要目标 Windows 运行时抓包，不属于当前版本实践范围；Linux 1.31 与 macOS 1.35 的固定材料对应关系已由运行值验证。
 
@@ -290,7 +292,7 @@ client 获取方式：枚举认证网卡地址，按目标部署顺序保留原�
 | `0x76` | 备用 DNS 文本    | 目标部署为 14 字节 IPv4 文本              | 来源与刷新时机待动态调查                       |
 | `0x79` | Direct 最高版本  | `2`                                       | macOS 1.35 构建固定值，属第 1 类               |
 
-> TODO（当前版本待动态调查）：`0x18`、`0x62`、`0x76` 的取值来源与刷新时机，以及冷启动且尚未取得平台事实时的取值。
+> TODO（当前版本待动态调查）：`0x18`、`0x62`、`0x76` 的取值来源与刷新时机。冷启动首次 Start 已记录为 `0x18=1`、`0x62=0`、IPv6 全零，但来源仍未确定。
 >
 > TODO（待 client 上线联调）：这些 client 事实取不同值时服务器是否接受。
 
@@ -347,14 +349,13 @@ P + 0x6f + 0x20 * service_count + 0x1b
 
 ### 目标部署运行值
 
-目标 macOS 1.35 部署的两次 EAP-MD5 Success 结构一致：固定段之前有 6 字节 `00001311 0000`，
+目标 macOS 1.35 部署已有三次 EAP-MD5 Success（含 2026-10-25 冷启动），结构一致：固定段之前有 6 字节 `00001311 0000`，
 按 `P=6+N` 取 `N=0` 时固定段从 `P=6` 起；其 `vendor_id=0x00001311`、`opaque[2]=0x0069`、`session_value=0`、`opaque[100]` 全零、
 `service_count=0`；两条记录均为 `vendor_id=0x00001311, kind=1, flag=1`。编码块解码为
-`vendor_id=0x00001311, code=0x0a, length=0`，`value_a` 随会话变化（两次采集分别为 `0x6aafbd01` 与
-`0x0aa121f8`），`value_b=20`，`value_c=0`。同一 Success 之后继续携带 `0x3c`、`0x56`、`0x5a`、`0x5b`、
+`vendor_id=0x00001311, code=0x0a, length=0`，`value_a` 随会话变化，`value_b=20`，`value_c=0`。同一 Success 之后继续携带 `0x3c`、`0x56`、`0x5a`、`0x5b`、
 `0x5c`、`0x5d`、`0x5e`、`0x6e`、`0x79`、`0x80` 和 `0x98`；客户端接受该结构。
 
-两次采集的所有 EAPOL 帧都没有出现 `0x53`。opaque 区、两条记录和编码块因此只证明目标部署的实际值及
+三份采集的所有 EAPOL 帧都没有出现 `0x53`。opaque 区、两条记录和编码块因此只证明目标部署的实际值及
 客户端接受结果，不能证明其他服务器策略下的必需性。
 
 > TODO（当前版本待动态调查）：客户端如何使用 Success 固定段与后续字段（例如通知文本、`0x3c` 账户文本和 Direct 启动参数），以及哪些字段会改变客户端行为。
