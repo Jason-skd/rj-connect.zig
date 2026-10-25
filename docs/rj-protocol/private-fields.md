@@ -73,8 +73,8 @@ inner_len = 2 + len(value)
 | legacy DHCP info | 23   | 厂商号、DHCP 标志、IPv4 参数和 CRC |
 | vendor ID        | 4    | `0x00001311`                       |
 | program name     | 32   | 样本为 `8021x.exe`，GBK，零填充    |
-| version          | 4    | `major, minor, 平台尾字节`；macOS 1.35 为 `2, 2` |
-| logoff reason    | 1    | 目标部署样本为 `0xf5`；正常认证通常为 `0`       |
+| version          | 4    | `major, minor, 平台尾字节`；macOS 1.35 为 `1,35,2,2` |
+| logoff reason    | 1    | 目标部署 Logoff 帧为 `0x01`；Start/Identity/MD5-Response 常见 `0x00`，首次 Start 亦出现 `0x30`、`0x61`、`0xa3`、`0xf5` 等值并被服务器接受 |
 | vendor ID        | 4    | `0x00001311`                                    |
 | reserved         | 2    | 目标部署样本为 `01 f0`                          |
 
