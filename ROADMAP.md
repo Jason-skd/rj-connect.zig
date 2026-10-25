@@ -66,7 +66,7 @@
 - 目标部署未观察到的服务端语义：IPv6 三槽与固定段不透明字段的业务名称；不影响已观察行为的复刻。
 - V3 与客户端构建的对应关系；Windows 进程派生材料及平台密码编码归入第 4 类“后续版本可选补齐调查”。
 - PEAP 证书/身份/TLS、PEAP/MSCHAPv2 平台密码、Direct version 2 与运行时间线、`0x53`、安全域/IPD 接受条件归入第 4 类“后续版本可选补齐调查”，不属于当前版本实践范围。
-- EAP-MD5 目标 profile 的实现，以及报告中标为“待 client 上线联调”的服务器接受条件与互操作验证。
+- 报告中标为“待 client 上线联调”的服务器接受条件与互操作验证；目标 profile 实现已随本版本完成。
 
 ### 报告与运行证据对齐
 
@@ -82,10 +82,29 @@
 - [x] 2026-10-25 冷启动采集确认 challenge 前 `0x2f` 为零 IV 口令链、`0x4d` 为全零，尾块按当前状态构造，并复算 2/2 V3。
 - [x] 差分复算确认 `0x2f` 的 challenge 密文保留给后续无 challenge 帧；保留值复位条件保留为动态调查项。
 
+### 目标 EAP-MD5 profile
+
+- 状态：已实施
+- 提交：`9e5a0e9`
+- 目标变更：把公开 `Session` 收敛为目标 macOS 1.35 有线 EAP-MD5 profile，client 只提供运行事实与凭据；PEAP/Direct/SAM/SMP 转内部研究模块。
+
+#### 验收
+
+- [x] 公开 interface 只保留目标 profile 的 `Session` 与通用 codec，不暴露 PEAP/Direct 配置类型。
+- [x] 标准 MD5 证明、零 IV/challenge 口令链、566 字节尾块、V3 摘要与终端私有通知由离线测试覆盖。
+- [x] Start/Identity/MD5-Response/Logoff 形状、目的 MAC、facts 更新与 `0x2f` 保留行为有回归测试。
+- [x] PEAP/Direct 请求显式拒绝，旧会话机器不影响公开类型。
+
+#### 待收尾
+
+- 与真实服务器的互操作验证：标准证明接受条件、尾块必要性、challenge 前字段校验。
+- `0x2f` 保留值复位条件；`0x18`/`0x62`/`0x76` 取值来源。
+
 ### M6: 交付边界与协议完整性收口
 
-- 状态：未开始
+- 状态：部分实施
 - 依赖：M2、M3、M4、M5
+- 说明：目标 profile 的公开 interface 收窄已由上一节完成；完整分类决策、Direct 内部 strategy 与服务器互操作仍待收尾。
 
 #### 目标
 

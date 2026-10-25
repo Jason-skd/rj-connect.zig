@@ -103,6 +103,7 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
+        std.crypto.secureZero(u8, &self.chain);
         self.* = undefined;
     }
 
@@ -424,17 +425,6 @@ pub const Session = struct {
             .authenticating => |*state| state.exchange = exchange,
             else => unreachable,
         }
-    }
-
-    fn peerMac(self: *const Session) ?[6]u8 {
-        return switch (self.state) {
-            .connecting => |state| if (state.exchange) |exchange| exchange.peer_mac else null,
-            .acquired => |state| state.exchange.peer_mac,
-            .authenticating => |state| state.exchange.peer_mac,
-            .authenticated => |state| state.peer_mac,
-            .held => |state| state.peer_mac,
-            .disconnected => null,
-        };
     }
 
     fn recomputeChain(self: *Session, start: [16]u8) Error!usize {

@@ -10,9 +10,9 @@ RJ Connect 是一个研究 Ruijie（锐捷）校园网认证协议的技术性�
 
 核心成果是[锐捷校园网认证协议研究报告](docs/rj-protocol/index.md)。报告按报文、私有字段、认证状态、直接通信和密码学组织定义、研究结论与固定向量，独立于 Zig 实例及其工程实施。协议研究结论及其适用边界以报告为准，协议信息的分类与放置规则见[协议文档管理原则](docs/rj-protocol/scope.md)，里程碑与验收目标见 [ROADMAP.md](ROADMAP.md)。
 
-`src/` 中的 Zig 代码提供对研究成果的一次实例复刻，以确定性协议引擎演示字段编解码、EAP-MD5 与 PEAPv0 编排、DHCP 衔接和 SAM/SMP 心跳生命周期；离线测试用于核对复刻行为与研究向量。网络 I/O、时钟、随机数、TLS、证书验证、MSCHAPv2 计算和系统适配由 client 提供。
+`src/` 中的 Zig 代码提供对研究成果的一次实例复刻：公开 `Session` 实现目标 macOS 1.35 有线 EAP-MD5 profile，包括标准 MD5 证明、566 字节私有尾块、V3 摘要、口令链与 Success/Failure 私有通知。PEAP、Direct、SAM/SMP 与旧私有分支保留为 `src/research/` 内部研究模块，不属于公开接口。网络 I/O、时钟、随机数、TLS、证书验证、MSCHAPv2 计算和系统适配由 client 提供。
 
-当前开发版本为 `v0.1.1`。Zig 实例仍是研究原型，交付边界见 ROADMAP。rj-connect 负责协议语义、字段来源、编号生成、状态转移和校验；client 只提供运行事实、外部能力、部署 profile 和用户凭据。client 如何取得或组织这些值不属于本库 interface 的约束。
+当前开发版本为 `v0.1.1`。公开 interface 只接受目标 profile 的运行事实与凭据；rj-connect 负责协议语义、字段构造、编号生成、状态转移和校验。client 如何取得或组织这些值不属于本库 interface 的约束，交付边界见 ROADMAP。
 
 ## 快速开始
 
@@ -24,20 +24,25 @@ RJ Connect 是一个研究 Ruijie（锐捷）校园网认证协议的技术性�
 zig build test
 ```
 
-通过 Zig 包模块 `rj-connect` 使用库。client 向协议引擎提交已接收的报文、当前时间和外部认证结果，并消费引擎返回的待发送报文、超时截止时间和状态变化。
+通过 Zig 包模块 `rj-connect` 使用库。client 向协议引擎提交已接收的报文、当前时间、运行事实与凭据，并消费引擎返回的待发送报文、超时截止时间和状态变化。
 
 ```zig
 const rj = @import("rj-connect");
 
 var session = try rj.session.Session.init(allocator, .{
-    .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+    .facts = .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+        .service_name = "students",
+        .alternate_dns_text = "202.116.32.254",
+    },
+    .credentials = .{ .username = "user", .password = "secret" },
 });
 defer session.deinit();
 var outcome = try session.step(now, .start);
 defer outcome.deinit(allocator);
 ```
 
-`protocol` 提供无会话生命周期的 codec 与密码学原语，`session` 提供统一的 `Session` 生命周期入口。配置、动作所有权、异步事件和已知限制见 [v0.1.1 使用说明](CHANGELOG.md#v011)。
+`protocol` 提供无会话生命周期的通用 codec 与密码学原语，`session` 提供目标 profile 的 `Session` 生命周期入口。配置、动作所有权、事件和已知限制见 [v0.1.1 使用说明](CHANGELOG.md#v011)。
 
 ## 开发验证
 
@@ -48,7 +53,7 @@ zig fmt --check src build.zig
 zig build test
 ```
 
-现有测试验证字段编码、已知答案密码学向量、PEAP 隧道编排、V3 五种模式、分片重组、ACK/重发、时间戳窗口、SAM/SMP 生命周期和错误边界。离线结果是复刻验证证据；真实网络、TLS 与 MSCHAPv2 互操作仍需外部适配验证。
+现有测试验证标准 EAP-MD5 证明、口令链、尾块布局、V3 固定向量、目标帧形状、facts 更新、重试/超时/取消和错误边界；`src/research/` 中的旧分支保留原有测试。离线结果是复刻验证证据；真实网络互操作仍需联调验证。
 
 ## 文档索引
 

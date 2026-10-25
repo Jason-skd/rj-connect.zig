@@ -62,6 +62,8 @@ pub const Facts = struct {
     }
 };
 
+/// Credentials are borrowed for the lifetime of the session; the client keeps
+/// the backing bytes alive and must not mutate them while the session runs.
 pub const Credentials = struct {
     username: []const u8,
     password: []const u8,

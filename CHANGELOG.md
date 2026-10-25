@@ -2,6 +2,12 @@
 
 ## v0.1.1
 
+### 9e5a0e9
+
+- 公开 `Session` 切换为目标 macOS 1.35 有线 EAP-MD5 profile：标准 MD5 证明、566 字节私有尾块、零 IV/challenge 口令链、V3 摘要与 Success/Failure 私有通知。
+- `Config` 收敛为运行事实与凭据；新增 `.facts` 事件；删除 PEAP/Direct 公开类型，PEAP 请求显式 `UnsupportedEapMethod`。
+- PEAP/Direct/SAM/SMP 与旧私有分支移至 `src/research/`，公开 `protocol` 只保留通用 codec；新增目标 profile 离线测试与 V3 构建材料。
+
 ### 9f296f2
 
 - 修正 EAP-MD5 尾块固定前缀：version 为 `1,35,2,2`；Logoff 的 logoff reason 为 `0x01`，Start 首次值可变且被服务器接受，不能作为固定要求。
@@ -136,10 +142,10 @@
 ### Usage
 
 - 从[研究报告](docs/rj-protocol/index.md)阅读字段与结论，结合[锐捷客户端认证状态机图](docs/rj-protocol/flow_chart.svg)查看路径条件。
-- 包版本为 `0.1.1`。通过模块 `rj-connect` 导入，`protocol` 提供无生命周期的 codec，`session.Session` 提供统一会话入口。
-- 启用 PEAP 时，在 `Config` 中允许 `peap` 并提供 `PeapConfig`。TLS 字节通过 `tunnel_input`、`tunnel_output` 交互，MSCHAPv2 计算与校验由外部 provider 完成。
-- 调用方提交当前时间及携带当前 `Generation` 的输入，并根据返回 deadline 驱动定时器。`Outcome` 拥有返回动作和报文字节，消费后调用 `Outcome.deinit`；会话结束时调用 `Session.deinit`。
-- PEAP 成功且完整 DHCP 租约、服务器参数和本地配置齐备后进入 Direct；EAP-MD5 路径通过 `direct_session` 提交 `DirectSessionConfig`。协议报告中的新结论与当前 API 的差异见本页 Limits。
+- 包版本为 `0.1.1`。通过模块 `rj-connect` 导入，`protocol` 提供通用 EAPOL/EAP/DHCP/V3/密码学 codec，`session.Session` 是目标 EAP-MD5 profile 的会话入口。
+- 创建会话时提供 `facts`（源 MAC、服务名、硬盘序列号、IPv6 槽、IPv4 租约、备用 DNS 文本、OS 位宽）与 `credentials`（GBK 原始字节）。Start 前必须已有这些值，因为尾块中的口令链在 Start 帧就需要计算。
+- 调用方提交当前时间及携带当前 `Generation` 的报文/定时器输入，并根据返回 deadline 驱动定时器。地址或租约变化时通过 `.facts` 事件提交新快照；该事件不带 generation。`Outcome` 拥有返回动作、报文字节与终端通知，消费后调用 `Outcome.deinit`；会话结束时调用 `Session.deinit`。
+- 初始 Start 发往主程序内嵌的锐捷地址；收到服务器帧后使用服务器源 MAC。PEAP 请求返回 `UnsupportedEapMethod`；PEAP、Direct、SAM/SMP 与旧私有分支保留在 `src/research/`，不属于公开接口。
 - 状态图以 Mermaid 源为权威，使用 Mermaid CLI 重新生成：
 
 ```sh
@@ -150,10 +156,10 @@ mmdc -i docs/rj-protocol/flow_chart.mmd -o docs/rj-protocol/flow_chart.svg --no-
 
 ### Limits
 
-- `DirectSessionConfig.session_id` 仍按整场固定值发送；逐逻辑消息递增、SAM/SMP 初始参数正式命名及本地端口 `80/8080` 的回退尚待实现收口，当前库本地端口默认值为 `20000`。
-- `Session` 的 EAP-MD5 路径仍为锐捷私有用户名证明；标准分支、PEAPv1/v2 与 Cryptobinding 尚未进入当前确定性会话。
-- 当前 `Session` 尚未构造 EAP-MD5 私有尾块，也尚未解析 Success 私有固定段；这两项属于 ROADMAP v0.1.1 待收尾的目标 profile 实现。
-- 目标部署的最小字段集合、V3 材料对应关系、Windows 进程派生机制、PEAP 信任链与非 ASCII 密码行为仍有未决语义。
-- 一个 EAP-MD5 会话的 Success 不构成 Direct 已建立的证明；Direct version 2 的完整互操作范围仍未明确。
-- 离线测试与状态机图不构成所有校园网互操作的保证；具体协议未知项保留在报告原定义位置。
+- 公开 `Session` 只覆盖目标 macOS 1.35 有线 EAP-MD5 路径；PEAP、Direct、SAM/SMP、DHCP 第二认证与旧私有用户名证明分支保留在 `src/research/`，不是交付接口。
+- 与真实服务器的互操作尚未验证：服务器是否要求 Start/Identity/Logoff 尾块、是否校验 challenge 前 `0x2f`/`0x4d`/`0x62`，以及我方标准 EAP-MD5 证明能否被接受。
+- `0x2f` 保留值复位为零 IV 默认值的触发条件仍未确定；实现按“新会话默认、challenge 后保留”处理。
+- `0x18`、`0x62`、`0x76` 的取值来源仍属动态调查；目标 profile 按观测行为构造，字段值分别由 facts 或帧类型决定。
+- V3 的 A/D 材料绑定目标 macOS 1.35 构建；其他构建、Windows 进程派生材料与 PEAP 信任链不在当前 profile 内。
+- 离线测试与状态图不构成所有校园网互操作的保证；具体协议未知项保留在报告原定义位置。
 - 报告中当前版本的剩余未知项按验证路径标记：“当前版本待动态调查”可由锐捷客户端采集或调试回答；“待 client 上线联调”需要我方实现与真实服务器交互，不能由观察锐捷客户端单独关闭。
