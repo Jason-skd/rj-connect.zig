@@ -12,7 +12,7 @@ RJ Connect 是一个研究 Ruijie（锐捷）校园网认证协议的技术性�
 
 `src/` 中的 Zig 代码提供对研究成果的一次实例复刻：公开 `Session` 实现目标 macOS 1.35 有线 EAP-MD5 profile，包括标准 MD5 证明、566 字节私有尾块、V3 摘要、口令链与 Success/Failure 私有通知。PEAP、Direct、SAM/SMP 与旧私有分支保留为 `src/research/` 内部研究模块，不属于公开接口。网络 I/O、时钟、随机数、TLS、证书验证、MSCHAPv2 计算和系统适配由 client 提供。
 
-当前开发版本为 `v0.1.1`。公开 interface 只接受目标 profile 的运行事实与凭据；rj-connect 负责协议语义、字段构造、编号生成、状态转移和校验。client 如何取得或组织这些值不属于本库 interface 的约束，交付边界见 ROADMAP。
+当前发布版本为 `v0.1.1`。公开 interface 只接受目标 profile 的运行事实与凭据；rj-connect 负责协议语义、字段构造、编号生成、状态转移和校验。client 如何取得或组织这些值不属于本库 interface 的约束，交付边界见 ROADMAP。
 
 ## 快速开始
 
