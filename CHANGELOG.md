@@ -2,6 +2,11 @@
 
 ## v0.1.1
 
+### 8d5cecf
+
+- 将依赖 Windows 运行时抓包或运行环境的第 4 类调查项（V3 派生材料、EAPHost MSCHAPv2、Windows `0x17`、Windows 部署身份、Windows 同会话 Direct 摘要）标记为“后续版本可选补齐调查”，不属于当前版本实践范围。
+- 当前版本剩余的第 4 类阻塞收敛为目标部署的 PEAP 与 Direct 触发路径；同步更新 ROADMAP 待收尾说明。
+
 ### d479b6a
 
 - 复核 macOS 1.35 目标部署的 7 个 EAP-MD5 challenge 响应：V3 模式 `0`、`2`、`3`、`4` 与内嵌材料按报告构造逐字节复现；两次采集的成功会话响应获得 Success。
