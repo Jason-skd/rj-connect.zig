@@ -2,6 +2,23 @@
 
 ## v0.1.1
 
+### b0907e2
+
+- 记录 legacy DHCP info 在写入 EAP-MD5 私有尾块前逐字节执行 `bit_reverse8(decoded ^ 0xff)`，并增加变换后的已知答案向量。
+- `protocol.dhcp.encode` 的注释明确它输出变换前块，避免把原始字节直接当作线上字节。
+
+### 423fb23
+
+- 修正 EAPOL packet type：`EAP-Packet=0`、`Start=1`、`Logoff=2`，与 IEEE 802.1X 和目标部署采集一致；此前的 Start/EAP 映射相反。
+- EAP 解码器接受以 Success/Failure code 携带的服务器私有数据，不再要求终端 EAP length 恰好为 4 字节。
+- 新增目标形状的会话回归：带私有固定段的 Success 可以进入 authenticated。
+
+### feb0d68
+
+- 协议报告按目标部署运行证据修正：EAPOL packet type、EAP-MD5 私有尾块位于声明长度之外、标准 EAP-MD5 属于当前版本实践范围、实测属性顺序、Success 私有数据位置、legacy DHCP 变换。
+- 第 3 类信息增加验证路径标记：“当前版本待动态调查”表示可由目标客户端采集或调试回答；“待 client 上线联调”表示需要我方实现向真实服务器发送报文才能确认。
+- 修正 macOS IPv6 槽位顺序、`0x17` 分类、`0x4d` challenge 前全零与 `0x2f` 沿用上次结果等与采集不符或缺失的结论。
+
 ### b754794
 
 - 当前版本实践范围收敛为目标部署实际选择的 EAP-MD5 路径；多次认证中未被服务器选择的 PEAP、Direct、`0x53`、安全域/IPD 以及 Windows 运行时项按第 4 类“后续版本可选补齐调查”处理。
@@ -110,6 +127,8 @@ mmdc -i docs/rj-protocol/flow_chart.mmd -o docs/rj-protocol/flow_chart.svg --no-
 
 - `DirectSessionConfig.session_id` 仍按整场固定值发送；逐逻辑消息递增、SAM/SMP 初始参数正式命名及本地端口 `80/8080` 的回退尚待实现收口，当前库本地端口默认值为 `20000`。
 - `Session` 的 EAP-MD5 路径仍为锐捷私有用户名证明；标准分支、PEAPv1/v2 与 Cryptobinding 尚未进入当前确定性会话。
+- 当前 `Session` 尚未构造 EAP-MD5 私有尾块，也尚未解析 Success 私有固定段；这两项属于 ROADMAP v0.1.1 待收尾的目标 profile 实现。
 - 目标部署的最小字段集合、V3 材料对应关系、Windows 进程派生机制、PEAP 信任链与非 ASCII 密码行为仍有未决语义。
 - 一个 EAP-MD5 会话的 Success 不构成 Direct 已建立的证明；Direct version 2 的完整互操作范围仍未明确。
 - 离线测试与状态机图不构成所有校园网互操作的保证；具体协议未知项保留在报告原定义位置。
+- 报告中当前版本的剩余未知项按验证路径标记：“当前版本待动态调查”可由锐捷客户端采集或调试回答；“待 client 上线联调”需要我方实现与真实服务器交互，不能由观察锐捷客户端单独关闭。
