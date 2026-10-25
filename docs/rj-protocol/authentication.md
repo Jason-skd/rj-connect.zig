@@ -279,7 +279,9 @@ Linux 1.31 内嵌 wpa_supplicant 的 NT password hash 输入最多为 256 字节
 
 macOS 1.35 使用系统 Security/CoreWLAN provider；Windows 6.85 存在 EAPHost provider 与内部 PEAP 路径。Linux 的密码字节展开规则不代表这两个平台的共同规则。目标 macOS 1.35 部署没有进入 PEAP，因此其系统 provider 的密码字符集与规范化不能从该部署观察。
 
-> TODO（当前版本待调查）：macOS 与 Windows PEAP/MSCHAPv2 的实际 provider 选择、非 ASCII 密码编码及规范化规则尚未明确。
+> TODO（当前版本待调查）：macOS PEAP/MSCHAPv2 的实际 provider 选择、非 ASCII 密码编码及规范化规则尚未明确。
+
+> TODO（后续版本可选补齐调查）：Windows EAPHost provider 的 MSCHAPv2 密码字符集与规范化需要目标 Windows 运行时，不属于当前版本实践范围。
 
 Direct 参数由服务器参数、DHCP 租约、本机网络信息与客户端身份共同确定。端口回退、时间戳和编号规则见[直接通信](direct.md#端口时间戳与本地回退)；可选身份及主机字段见[私有字段布局](private-fields.md)。
 
