@@ -2,6 +2,10 @@
 
 ## v0.1.1
 
+### 9f296f2
+
+- 修正 EAP-MD5 尾块固定前缀：version 为 `1,35,2,2`；Logoff 的 logoff reason 为 `0x01`，Start 首次值可变且被服务器接受，不能作为固定要求。
+
 ### 5dc3924
 
 - 差分复算关闭 `0x2f` 的 IV 问题：无 challenge 值为零 IV 口令链结果，challenge 后密文保留给后续 Start/Identity/Logoff；剩余动态项改为“保留值复位条件”。
