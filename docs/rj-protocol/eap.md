@@ -14,7 +14,7 @@ EAP-MD5 至少存在两种响应分支：标准口令证明和锐捷私有用户
 
 ## 以太网与 EAPOL 外层
 
-认证帧是以太网 II 帧，EtherType 为大端 `0x888E`。标准目的地址为 `01:80:C2:00:00:03`；锐捷 NAS 部署使用部署相关的目的地址，目标部署为 `01:d0:f8:00:00:03`（见[Client 输入：目的 MAC](#client-输入目的-mac)）。
+认证帧是以太网 II 帧，EtherType 为大端 `0x888E`。标准目的地址为 `01:80:C2:00:00:03`；锐捷 NAS 部署使用部署相关的目的地址，目标部署初始 Start 为 `01:d0:f8:00:00:03`，后续响应使用服务器源 MAC（见[Client 输入：目的 MAC](#client-输入目的-mac)）。
 
 | 偏移   | 长度 | 字段               | 编码                           |
 | ------ | ---- | ------------------ | ------------------------------ |
@@ -34,13 +34,11 @@ Start 与 Logoff 的 body length 为零。这里的 packet type 是 EAPOL 层的
 | ---------- | ---------- |
 | 目的 MAC   | 6 字节地址 |
 
-用途：作为 EAPOL 帧的目的地址。目的地址的布局与目标部署取值属于第 1 类：目标部署的 Start、Identity、MD5-Response 与 Logoff 均发往 `01:d0:f8:00:00:03`。
+用途：作为 EAPOL 帧的目的地址。目标部署的分派规则为：应用首次 Start 发往内嵌的锐捷 NAS 地址 `01:d0:f8:00:00:03`；收到服务器帧后，Identity、MD5-Response 与 Logoff 发往服务器源 MAC（本次采集为 `00:1a:a9:17:ff:ff`）。目标采集中的标准组播地址 `01:80:C2:00:00:03` 只出现在系统 `eapolclient` 的裸帧中，未出现在锐捷应用的 EAP-MD5 帧中。
 
-client 获取方式：目标 macOS 1.35 主程序中同时内嵌标准组播地址 `01:80:c2:00:00:03` 与锐捷 NAS 地址 `01:d0:f8:00:00:03` 两个六字节常量；目标部署使用后者。两者的选择条件属于第 3 类，当前版本不设置默认值。
+client 获取方式：目标 macOS 1.35 主程序中同时内嵌标准组播地址与锐捷 NAS 地址两个常量；初始 Start 使用锐捷地址，后续响应使用接收帧的源 MAC。client 必须保留服务器源 MAC 并把它作为响应目的地址；找不到目标地址时显式失败，不静默回退到标准组播。
 
-> TODO（当前版本待动态调查）：目标客户端在两个内嵌目的地址之间如何选择，以及该选择是否随认证模式、NAS 或部署变化。
->
-> TODO（待 client 上线联调）：目标服务器是否接受标准组播地址 `01:80:C2:00:00:03`；在取得答案前，client 不得静默回退，找不到目标地址时应显式失败。
+> TODO（当前版本待动态调查）：目标应用是否会在其他认证模式或部署中使用标准组播地址作为 Start 目的地址。
 
 ### Client 输入：接收帧
 
@@ -161,6 +159,10 @@ EAP-TLS 同时具有内嵌支持与具名选择配置：Windows 的 `AuthMode=EA
 > TODO （后续版本可选实施）：EAP-TLS、EAP-TTLS、EAP-GTC、EAP-LEAP、EAP-OTP 和独立 EAP-MSCHAPv2 外层认证。
 
 服务器 `Success` code `3` 表示 EAP 方法成功，`Failure` code `4` 表示方法失败。它们不是 EAP Request，没有 EAP type 字段；但 `length` 可以大于标准终端的 4 字节。目标部署的 Success 在 EAP length 内携带锐捷私有固定段（见[锐捷私有字段](private-fields.md#服务器固定段)），客户端必须按完整 EAP length 接收，并把 `code`、`identifier` 之外的字节视为服务器私有数据。
+
+Failure 同样可以携带私有数据：目标部署一次为 6 字节 `vendor_id + notification_len=0`，另一次为 34 字节 `vendor_id + notification_len=0x1c` 后接 28 字节私有文本。Success 与 Failure 的终端 data 都不能按标准 4 字节布局裁剪。
+
+> TODO（当前版本待动态调查）：Failure 私有文本的业务含义与客户端展示方式。
 
 ## 身份响应
 
