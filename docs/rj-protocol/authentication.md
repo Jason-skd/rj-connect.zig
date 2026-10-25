@@ -260,6 +260,8 @@ client 获取方式：TLS provider 处理服务器记录并产生响应，依据
 
 服务器身份约束来自部署 profile；证书链、Subject/SAN、公钥指纹与协商 TLS 版本属于具体服务器会话。Linux 1.31 支持 TLS 1.0 系列协议、`ca_cert`、`ca_path` 与证书链验证，不能由此确定服务器的证书或最终协商版本。
 
+目标 macOS 1.35 部署的两轮采集均由服务器选择 EAP-MD5，全部 EAPOL 帧不含 PEAP 或 TLS 记录，因此该部署没有可记录的服务器证书、身份字段或 TLS 版本。PEAP 参数仍需在会进入 PEAP 的部署上观察。
+
 > TODO（当前版本待调查）：具体 PEAP 部署的服务器身份、证书信任链与 TLS 协商参数尚未明确。
 
 ### Client 输入：MSCHAPv2
@@ -275,11 +277,13 @@ client 获取方式：MSCHAPv2 provider 根据用户凭据与服务器 challenge
 
 Linux 1.31 内嵌 wpa_supplicant 的 NT password hash 输入最多为 256 字节。每个原始密码字节成为一个 UTF-16LE code unit 的低字节，高字节为零；不进行 UTF-8/GBK 解码、Unicode 规范化或代理项处理。中文密码的结果因此取决于输入字节编码，UTF-8 或 GBK 多字节序列均逐字节展开。
 
-macOS 1.35 使用系统 Security/CoreWLAN provider；Windows 6.85 存在 EAPHost provider 与内部 PEAP 路径。Linux 的密码字节展开规则不代表这两个平台的共同规则。
+macOS 1.35 使用系统 Security/CoreWLAN provider；Windows 6.85 存在 EAPHost provider 与内部 PEAP 路径。Linux 的密码字节展开规则不代表这两个平台的共同规则。目标 macOS 1.35 部署没有进入 PEAP，因此其系统 provider 的密码字符集与规范化不能从该部署观察。
 
 > TODO（当前版本待调查）：macOS 与 Windows PEAP/MSCHAPv2 的实际 provider 选择、非 ASCII 密码编码及规范化规则尚未明确。
 
 Direct 参数由服务器参数、DHCP 租约、本机网络信息与客户端身份共同确定。端口回退、时间戳和编号规则见[直接通信](direct.md#端口时间戳与本地回退)；可选身份及主机字段见[私有字段布局](private-fields.md)。
+
+目标 macOS 1.35 部署的 EAP-MD5 交换确认了实际客户端字段集合：`0x17`、`0x18`、`0x2d`、`0x2f`、`0x35`、`0x38`、`0x4e`、`0x36`、`0x4d`、`0x39="students"`、`0x54`、`0x62`、`0x6f`、`0x70`、`0x76`、`0x79`；未发送 `0x55`、`0x64`。这一集合只属于该 EAP-MD5 部署，不能外推到 PEAP 部署的最小字段集合。
 
 > TODO（当前版本待调查）：各 PEAP 部署要求的客户端名称、版本、IPv6、安全域及其他可选字段的最小集合尚未明确。
 

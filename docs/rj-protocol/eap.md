@@ -89,7 +89,9 @@ Windows 6.85 的 `Support`/`SupportNum` 分别表示能力位图和能力数量�
 
 macOS 1.35 的一个部署使用标准形状的 EAP-MD5：服务器选择 MD5-Challenge，客户端以 `value_size=16`、16 字节原始摘要和用户名响应，服务器返回 Success。其 `authmode=1` 表示接入模式，不等同于 EAP type。
 
-> TODO（当前版本待调查）：其他部署的学校配置、`AuthMode` 与服务器实际选择的 EAP 方法之间的对应关系尚未明确。
+目标 macOS 1.35 部署在 2026-10-24 的两轮采集中共完成 7 次 MD5-Challenge/Response，服务器始终选择 EAP-MD5，未出现 PEAP/EAP-TLS 帧或 TLS 记录。该部署的运行时 profile 为 `authmode=1`、`service=students`、`adapter=en7`；目标安装目录没有随包 `SuConfig_new.ini`，运行时 profile 不含 `SchoolCode`，macOS 客户端在 EAP-MD5 交换中也不发送学校代码。随包样本的 `SCNU`、`gznu`、`gyzyu` 属于不同学校定制，不能作为目标部署名称证据。
+
+> TODO（当前版本待调查）：其他部署（尤其 Windows）的学校配置、`AuthMode` 与服务器实际选择的 EAP 方法之间的对应关系尚未明确；macOS 目标部署只确认了运行时 `authmode=1` 与服务器选择的 EAP-MD5。
 
 ## 请求与响应分派
 
