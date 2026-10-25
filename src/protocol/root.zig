@@ -1,31 +1,30 @@
 //! Wire-level protocol types and codecs.
 
+const std = @import("std");
+
 pub const wire = @import("wire.zig");
 pub const eapol = @import("eapol.zig");
 pub const eap = @import("eap.zig");
-pub const peap = @import("peap.zig");
-pub const ruijie_peap = @import("ruijie_peap.zig");
 pub const dhcp = @import("dhcp.zig");
-pub const vendor = @import("vendor.zig");
-pub const direct = @import("direct.zig");
-pub const sam = @import("sam.zig");
-pub const smp = @import("smp.zig");
 pub const crypto = @import("crypto.zig");
 pub const v3 = @import("v3.zig");
-pub const des = @import("des.zig");
 
 test {
     _ = wire;
     _ = eapol;
     _ = eap;
-    _ = peap;
-    _ = ruijie_peap;
     _ = dhcp;
-    _ = vendor;
-    _ = direct;
-    _ = sam;
-    _ = smp;
     _ = crypto;
     _ = v3;
-    _ = des;
+
+    // Research-only protocol modules stay internal to the package.
+    _ = @import("peap.zig");
+    _ = @import("ruijie_peap.zig");
+    _ = @import("vendor.zig");
+    _ = @import("direct.zig");
+    _ = @import("sam.zig");
+    _ = @import("smp.zig");
+    _ = @import("des.zig");
+    _ = @import("ruijie_eap_md5.zig");
+    _ = @import("v3_macos135.zig");
 }
