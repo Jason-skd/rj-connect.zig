@@ -2,6 +2,11 @@
 
 ## v0.1.1
 
+### 5dc3924
+
+- 差分复算关闭 `0x2f` 的 IV 问题：无 challenge 值为零 IV 口令链结果，challenge 后密文保留给后续 Start/Identity/Logoff；剩余动态项改为“保留值复位条件”。
+- 新增 EAP-MD5 零 IV 口令链测试向量；同步 `0x2f` 在密码学、私有字段、EAP、认证状态与索引中的表述。
+
 ### 6c93756
 
 - 冷启动失败场景补充：`Failure` 终端帧可携带 6 字节或 34 字节私有 data；第一次失败由系统 `eapolclient` 对 MD5-Challenge 返回 NAK 引起，不作为目标应用的失败语义。
