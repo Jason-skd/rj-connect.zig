@@ -262,7 +262,7 @@ client 获取方式：TLS provider 处理服务器记录并产生响应，依据
 
 目标 macOS 1.35 部署的两轮采集均由服务器选择 EAP-MD5，全部 EAPOL 帧不含 PEAP 或 TLS 记录，因此该部署没有可记录的服务器证书、身份字段或 TLS 版本。PEAP 参数仍需在会进入 PEAP 的部署上观察。
 
-> TODO（当前版本待调查）：具体 PEAP 部署的服务器身份、证书信任链与 TLS 协商参数尚未明确。
+> TODO（后续版本可选补齐调查）：具体 PEAP 部署的服务器身份、证书信任链与 TLS 协商参数；目标部署在多轮认证中始终选择 EAP-MD5，不属于当前版本实践范围。
 
 ### Client 输入：MSCHAPv2
 
@@ -279,7 +279,7 @@ Linux 1.31 内嵌 wpa_supplicant 的 NT password hash 输入最多为 256 字节
 
 macOS 1.35 使用系统 Security/CoreWLAN provider；Windows 6.85 存在 EAPHost provider 与内部 PEAP 路径。Linux 的密码字节展开规则不代表这两个平台的共同规则。目标 macOS 1.35 部署没有进入 PEAP，因此其系统 provider 的密码字符集与规范化不能从该部署观察。
 
-> TODO（当前版本待调查）：macOS PEAP/MSCHAPv2 的实际 provider 选择、非 ASCII 密码编码及规范化规则尚未明确。
+> TODO（后续版本可选补齐调查）：macOS PEAP/MSCHAPv2 的实际 provider 选择、非 ASCII 密码编码及规范化规则需要 PEAP 部署；目标部署未进入 PEAP，不属于当前版本实践范围。
 
 > TODO（后续版本可选补齐调查）：Windows EAPHost provider 的 MSCHAPv2 密码字符集与规范化需要目标 Windows 运行时，不属于当前版本实践范围。
 
@@ -287,7 +287,7 @@ Direct 参数由服务器参数、DHCP 租约、本机网络信息与客户端�
 
 目标 macOS 1.35 部署的 EAP-MD5 交换确认了实际客户端字段集合：`0x17`、`0x18`、`0x2d`、`0x2f`、`0x35`、`0x38`、`0x4e`、`0x36`、`0x4d`、`0x39="students"`、`0x54`、`0x62`、`0x6f`、`0x70`、`0x76`、`0x79`；未发送 `0x55`、`0x64`。这一集合只属于该 EAP-MD5 部署，不能外推到 PEAP 部署的最小字段集合。
 
-> TODO（当前版本待调查）：各 PEAP 部署要求的客户端名称、版本、IPv6、安全域及其他可选字段的最小集合尚未明确。
+> TODO（后续版本可选补齐调查）：各 PEAP 部署要求的客户端名称、版本、IPv6、安全域及其他可选字段的最小集合；目标部署未进入 PEAP，不属于当前版本实践范围。
 
 > TODO （后续版本可选实施）：TLS 握手与证书验证，以及 MSCHAPv2 密码学计算与成功认证器校验。
 
