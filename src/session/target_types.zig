@@ -41,14 +41,19 @@ pub const Lease = struct {
 /// remain valid for the duration of the call that uses them.
 pub const Facts = struct {
     source_mac: [6]u8,
+    /// GBK bytes; sent as a 32-byte zero-padded field when non-empty.
     service_name: []const u8 = &.{},
+    /// ASCII bytes; sent as a 64-byte zero-padded field, empty is all zero.
     disk_serial: []const u8 = &.{},
+    /// `0x35` address count/status; target frames use 5 when addresses exist.
     ipv6_state: u8 = 0,
     ipv6_link_local: ?[16]u8 = null,
     ipv6_global: ?[16]u8 = null,
     ipv6_third: ?[16]u8 = null,
     lease: Lease = .{},
+    /// `0x76` text; the attribute is omitted when empty.
     alternate_dns_text: []const u8 = &.{},
+    /// `0x70`; 0x20 for 32-bit and 0x40 for 64-bit.
     os_bits: u8 = 0x40,
 
     pub fn validate(self: Facts) Error!void {

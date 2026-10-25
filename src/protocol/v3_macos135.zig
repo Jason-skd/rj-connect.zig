@@ -1,5 +1,6 @@
 //! V3 digest inputs compiled into the macOS 1.35 client build.
 
+const std = @import("std");
 const v3 = @import("v3.zig");
 
 /// Application data array embedded in the target client binary.
@@ -26,5 +27,3 @@ test "macOS 1.35 materials reproduce a captured V3 digest" {
         text,
     );
 }
-
-const std = @import("std");
