@@ -136,3 +136,8 @@
 - 只在本校或特定客户端版本观察到的行为可以形成具名兼容 profile，但必须记录证据、适用范围和退出边界。
 - [协议文档管理原则](docs/rj-protocol/scope.md)与[研究报告入口](docs/rj-protocol/index.md)共同管理 `docs/prototype`（当前仓库路径为 `docs/rj-protocol`）；协议信息的分类与放置位置以这两个文件为准。
 
+### 版本文档归档
+
+- 每个版本发布后，从发布 tag 提取 `ROADMAP.md` 与 `CHANGELOG.md`，归档至 `docs/archive/<tag>/`；内容须与 tag 中的原文件逐字节一致，归档后冻结。
+- 历史版本文档统一从[归档目录](docs/archive/)查找：`<tag>/ROADMAP.md` 保存该版本的目标、里程碑与验收，`<tag>/CHANGELOG.md` 保存该版本的变化、用法与限制。
+- 仓库根目录的 `ROADMAP.md` 与 `CHANGELOG.md` 只维护当前开发版本的目标、待办和演进；后续修订归入当前版本，变更按实际 commit hash 索引。归档规则与历史文档入口统一在本节维护。

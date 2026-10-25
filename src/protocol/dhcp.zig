@@ -18,7 +18,10 @@ pub const DecodeError = error{
     InvalidChecksum,
 };
 
-/// Encodes the fixed DHCP information block used by the legacy EAP-MD5 path.
+/// Encodes the fixed DHCP information block before it is placed on the wire.
+///
+/// The EAP-MD5 private tail stores each byte after `wire.encodePropertyByte`;
+/// callers that emit raw wire bytes must apply that transform to the result.
 pub fn encode(info: LegacyDhcpInfo, output: *[encoded_size]u8) void {
     output.* = @splat(0);
     output[0..4].* = .{ 0x00, 0x00, 0x13, 0x11 };
@@ -71,6 +74,27 @@ test "legacy DHCP information encodes fields and trailing CRC" {
         0x01, 0xcb, 0x00, 0x71,
         0x35, 0x90, 0xee,
     }, &encoded);
+}
+
+test "legacy DHCP information matches the transformed wire vector" {
+    var block: [encoded_size]u8 = undefined;
+    encode(.{
+        .dhcp_enabled = true,
+        .ip = .{ 192, 0, 2, 10 },
+        .netmask = .{ 255, 255, 255, 0 },
+        .gateway = .{ 192, 0, 2, 1 },
+        .dns = .{ 203, 0, 113, 53 },
+    }, &block);
+
+    var on_wire: [encoded_size]u8 = undefined;
+    for (block, 0..) |byte, index| on_wire[index] = wire.encodePropertyByte(byte);
+
+    try std.testing.expectEqualSlices(u8, &.{
+        0xff, 0xff, 0x37, 0x77, 0x7f, 0xfc,
+        0xff, 0xbf, 0xaf, 0x00, 0x00, 0x00,
+        0xff, 0xfc, 0xff, 0xbf, 0x7f, 0x2c,
+        0xff, 0x71, 0x53, 0xf6, 0x88,
+    }, &on_wire);
 }
 
 test "legacy DHCP information decodes a valid block" {

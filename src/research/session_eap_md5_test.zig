@@ -60,7 +60,7 @@ test "Session start enters connecting and emits EAPOL Start" {
     try std.testing.expectEqualSlices(u8, &.{
         0x01, 0x80, 0xc2, 0x00, 0x00, 0x03,
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-        0x88, 0x8e, 0x01, 0x00, 0x00, 0x00,
+        0x88, 0x8e, 0x01, 0x01, 0x00, 0x00,
     }, outcome.actions[0].send_frame);
     try std.testing.expectEqual(timestamp(std.time.ns_per_s * 30), outcome.next_deadline.?);
 }
@@ -151,6 +151,20 @@ fn terminalRequest(code: eapol.EapCode, identifier: u8) [eapol.header_size + 4]u
     return frame;
 }
 
+fn successWithPrivateData(identifier: u8) [eapol.header_size + 4 + 8]u8 {
+    const data = [_]u8{ 0x00, 0x00, 0x13, 0x11, 0x00, 0x00, 0xaa, 0xbb };
+    var frame: [eapol.header_size + 4 + data.len]u8 = undefined;
+    @memcpy(frame[0..eapol.header_size], &eapolHeader(.eap, 4 + data.len));
+    frame[eapol.header_size..][0..4].* = .{
+        @backingInt(eapol.EapCode.success),
+        identifier,
+        0,
+        @intCast(4 + data.len),
+    };
+    @memcpy(frame[eapol.header_size + 4 ..], &data);
+    return frame;
+}
+
 fn prepareChallengeSession(session: *Session) !void {
     var started = try session.step(timestamp(0), .start);
     started.deinit(std.testing.allocator);
@@ -219,6 +233,22 @@ test "Session drives EAP-MD5 from start to authenticated" {
     );
 
     const success = terminalRequest(.success, 0x17);
+    var authenticated = try session.step(timestamp(5 * std.time.ns_per_s), frameInput(&session, &success));
+    defer authenticated.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Phase.authenticating, authenticated.previous_phase);
+    try std.testing.expectEqual(Phase.authenticated, authenticated.phase);
+    try std.testing.expectEqual(@as(?std.Io.Timestamp, null), authenticated.next_deadline);
+    try std.testing.expectEqual(@as(usize, 0), authenticated.actions.len);
+}
+
+test "Session accepts Success carrying server private data" {
+    var session = try Session.init(std.testing.allocator, .{
+        .source_mac = .{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 },
+    });
+    defer session.deinit();
+    try prepareChallengeSession(&session);
+
+    const success = successWithPrivateData(0x17);
     var authenticated = try session.step(timestamp(5 * std.time.ns_per_s), frameInput(&session, &success));
     defer authenticated.deinit(std.testing.allocator);
     try std.testing.expectEqual(Phase.authenticating, authenticated.previous_phase);

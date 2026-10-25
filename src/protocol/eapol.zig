@@ -6,9 +6,10 @@ pub const header_size = 18;
 pub const ether_type: u16 = 0x888e;
 pub const default_destination = [6]u8{ 0x01, 0x80, 0xc2, 0x00, 0x00, 0x03 };
 
+/// EAPOL frame types from IEEE 802.1X: EAP-Packet `0`, Start `1`, Logoff `2`.
 pub const PacketType = enum(u8) {
-    start = 0,
-    eap = 1,
+    eap = 0,
+    start = 1,
     logoff = 2,
     _,
 };
@@ -37,6 +38,7 @@ pub const Eap = struct {
     code: EapCode,
     identifier: u8,
     type: ?EapType,
+    /// Type-specific payload. For Success and Failure this is server private data.
     data: []const u8,
 };
 
@@ -214,7 +216,6 @@ pub fn decode(input: []const u8) DecodeError!Frame {
     }
     const has_type = code == .request or code == .response;
     if (has_type and eap_len < 5) return error.MissingEapType;
-    if (!has_type and eap_len != 4) return error.UnexpectedEapType;
 
     return .{
         .destination = input[0..6].*,
@@ -224,7 +225,7 @@ pub fn decode(input: []const u8) DecodeError!Frame {
             .code = code,
             .identifier = eap[1],
             .type = if (has_type) @as(EapType, @fromBackingInt(@intCast(eap[4]))) else null,
-            .data = if (has_type) eap[5..eap_len] else &.{},
+            .data = if (has_type) eap[5..eap_len] else eap[4..eap_len],
         },
     };
 }
@@ -239,7 +240,7 @@ test "EAPOL Start encodes and decodes the fixed frame layout" {
     try std.testing.expectEqualSlices(u8, &.{
         0x01, 0x80, 0xc2, 0x00, 0x00, 0x03,
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-        0x88, 0x8e, 0x01, 0x00, 0x00, 0x00,
+        0x88, 0x8e, 0x01, 0x01, 0x00, 0x00,
     }, &encoded);
 
     const frame = try decode(&encoded);
@@ -255,7 +256,7 @@ test "EAP Identity request decodes and Identity response encodes" {
     const request = [header_size + 5]u8{
         0x01, 0x80, 0xc2, 0x00, 0x00, 0x03,
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-        0x88, 0x8e, 0x01, 0x01, 0x00, 0x05,
+        0x88, 0x8e, 0x01, 0x00, 0x00, 0x05,
         0x01, 0x16, 0x00, 0x05, 0x01,
     };
 
@@ -271,7 +272,7 @@ test "EAP Identity request decodes and Identity response encodes" {
     try std.testing.expectEqualSlices(u8, &.{
         0x01, 0x80, 0xc2, 0x00, 0x00, 0x03,
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-        0x88, 0x8e, 0x01, 0x01, 0x00, 0x0a,
+        0x88, 0x8e, 0x01, 0x00, 0x00, 0x0a,
         0x02, 0x16, 0x00, 0x0a, 0x01, 'a',
         'l',  'i',  'c',  'e',
     }, encoded);
@@ -281,7 +282,7 @@ test "EAP terminal packets and Logoff decode with strict framing checks" {
     const success = [header_size + 4]u8{
         0x01, 0x80, 0xc2, 0x00, 0x00, 0x03,
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-        0x88, 0x8e, 0x01, 0x01, 0x00, 0x04,
+        0x88, 0x8e, 0x01, 0x00, 0x00, 0x04,
         0x03, 0x17, 0x00, 0x04,
     };
     const success_frame = try decode(&success);
@@ -310,6 +311,21 @@ test "EAP terminal packets and Logoff decode with strict framing checks" {
     malformed = success;
     malformed[21] = 5;
     try std.testing.expectError(error.InvalidEapLength, decode(&malformed));
+}
+
+test "EAP terminal packets carry server private data without an EAP type" {
+    const destination = [6]u8{ 0x01, 0x80, 0xc2, 0x00, 0x00, 0x03 };
+    const source = [6]u8{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55 };
+    const data = [_]u8{ 0x00, 0x00, 0x13, 0x11, 0x00, 0x00, 0xaa, 0xbb };
+    inline for ([_]EapCode{ .success, .failure }) |code| {
+        var buffer: [header_size + 4 + data.len]u8 = undefined;
+        const encoded = try encodeEap(destination, source, code, 0x2a, null, &data, &buffer);
+        const frame = try decode(encoded);
+        try std.testing.expectEqual(code, frame.eap.?.code);
+        try std.testing.expectEqual(@as(u8, 0x2a), frame.eap.?.identifier);
+        try std.testing.expectEqual(@as(?EapType, null), frame.eap.?.type);
+        try std.testing.expectEqualSlices(u8, &data, frame.eap.?.data);
+    }
 }
 
 test "EAP-MD5 challenge and response match the protocol known answer" {

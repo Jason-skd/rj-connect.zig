@@ -8,9 +8,9 @@
 从一个 `start` 建立连接到认证终止的一次确定性运行。
 _Avoid_: 连接、登录流程
 
-**认证方法策略**：
-一次认证尝试允许使用的外层 EAP 方法集合；服务器只能从中选择，不能使 client 静默采用未配置的方法。
-_Avoid_: 自动降级、方法回退
+**目标 profile**：
+rj-connect 内建的具名兼容行为：目标 macOS 1.35 有线 EAP-MD5 的标准证明、零 IV/challenge 口令链、566 字节私有尾块、V3 材料与终端私有布局。公开接口不通过配置选择 profile。
+_Avoid_: client 传入的 profile、文件加载
 
 **协议事实**：
 已有字节布局、固定向量或客户端构造证据支持的字段和机制。
@@ -20,13 +20,13 @@ _Avoid_: 调研灵感、可能解释
 已观察到字段或状态存在，但其用途、生成方式或生命周期尚未得到证据确认。
 _Avoid_: client 参数、部署配置
 
-**部署 profile**：
-由 client 选择并提供、随学校或客户端构建变化的一组已定义值及其兼容行为。
-_Avoid_: 语义未证明字段、任意覆盖
+**运行事实**：
+由 client 在会话创建或 `.facts` 事件中提供的环境值，例如源 MAC、IPv6 槽、IPv4 租约、服务名、硬盘序列号。
+_Avoid_: 协议常量、未证明语义
 
-**研究原型**：
-用于验证调查结论、但可能保留语义未证明输入或不完整兼容策略的代码版本。
-_Avoid_: 交付版本、兼容声明
+**研究模块**：
+`src/research/` 中保留的 PEAP、Direct、SAM/SMP 与旧私有分支实现，用于验证研究结论；它们不属于公开交付接口。
+_Avoid_: 交付版本、公开配置
 
 ## PEAP 与外部隧道
 
@@ -59,16 +59,19 @@ _Avoid_: EAPOL 帧、网络发送结果
 _Avoid_: 凭据存储、EAP codec
 
 **PEAP V3 输入材料**：
-计算 PEAP V3 摘要所需、由 client 按部署 profile 提供的应用数据和动态库数据。
+计算 PEAP V3 摘要所需的应用数据和动态库数据。目标 EAP-MD5 profile 将 macOS 1.35 材料内建于库；PEAP 研究模块仍由调用方提供。
 _Avoid_: 客户端安装路径、运行时文件读取
 
 **PEAP Direct 交接**：
-PEAP 完成且租约和直接会话参数齐备后，同一 `Session` 从 PEAP 阶段转入 Direct 阶段的一次转换。
+PEAP 完成且租约和直接会话参数齐备后，PEAP 研究模块从隧道阶段转入 Direct 阶段的一次转换。
 _Avoid_: 第二会话、隐式默认配置
 
 **PEAP Direct 本地回退值**：
-服务器未提供 UTC、本地端口或其他可选 Direct 参数时，由 rj-connect 按具名兼容 profile 选择、再由 client adapter 落实的平台值。
+PEAP 研究模块在服务器未提供 UTC、本地端口或其他可选 Direct 参数时选择的平台回退值。
 _Avoid_: 协议固定默认值、任意猜测值
+
+**终端私有通知**：
+Success/Failure 私有 data 中 `vendor_id` 与长度字段之后的文本；`Outcome` 以拥有所有权的消息返回。
 
 ## 直接通信
 

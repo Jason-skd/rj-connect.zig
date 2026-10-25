@@ -2,14 +2,13 @@
 title: SAM 与 SMP 直接通信
 description: 定义原始以太网会话、42 字节头、分片、重组、加密和业务消息
 contentType: Reference
-plan: "index.md#文档计划"
 ---
 
 # SAM 与 SMP 直接通信
 
 本页定义 EAP 成功后的直接通信。客户端使用原始以太网帧承载 IPv4 与 UDP，在 UDP 数据后放置 42 字节私有头和 DES-CBC 密文。
 
-Linux 1.31 的静态证据还区分了“逻辑消息关联 ID”和“片段 ID”。厂商代码沿用 `dwSessionID` 来称呼前者，但它不是整场 Direct 生命周期的固定值，不能据此把所有消息绑定到同一个 ID。
+Direct 区分逻辑消息关联 ID 与片段 ID：前者按逻辑消息分配，后者按片段分配，均不表示整场会话的固定标识。
 
 本页未标记的帧层次、头字段、TLV、分片和密码学属于[第 1 类已证明事实](scope.md#信息分类)。Direct 所需的 DHCP、本机网络事实和硬件信息属于第 2 类 client 输入。
 
@@ -33,7 +32,7 @@ IPv4 total length 等于 `28 + 42 + len(encrypted_chunk)`。UDP length 等于 `8
 
 | 偏移   | 长度 | 字段           | 规则                         |
 | ------ | ---- | -------------- | ---------------------------- |
-| `0x00` | 1    | version        | 固定 `1`                     |
+| `0x00` | 1    | version        | 默认 `1`，协商关系见下节     |
 | `0x01` | 1    | code           | `1=data`，`2=response`       |
 | `0x02` | 4    | fragment ID    | 同一发送上下文内逐片段递增   |
 | `0x06` | 2    | packet length  | `42 + len(encrypted_chunk)`  |
@@ -44,24 +43,34 @@ IPv4 total length 等于 `28 + 42 + len(encrypted_chunk)`。UDP length 等于 `8
 | `0x25` | 1    | flags          | 分片位置                     |
 | `0x26` | 4    | total length   | 完整加密载荷长度             |
 
-> TODO（后续版本可选补齐调查）：Direct version 2 的线格式、能力协商和状态差异。
+### Direct version 与 `0x79` 能力值
+
+Linux 1.31、macOS 1.35 与 Windows 6.85 使用本页所述 42 字节布局，默认头版本为 `1`。三个客户端均以私有字段 `0x79=2` 声明最高支持版本。
+
+| 平台         | 服务器 `0x79` 与发送版本的关系                        |
+| ------------ | ----------------------------------------------------- |
+| Linux 1.31   | 服务器值缺失时为 `1`；存在时取服务器值与 `2` 的较小者 |
+| macOS 1.35   | 服务器值缺失时为 `1`；存在时上限为 `2`                |
+| Windows 6.85 | 保存服务器值；该值与发送头版本的关系尚未明确          |
+
+Linux 与 macOS 的版本选择仍使用同一 42 字节头。尚无已明确的 version 2 专用布局；能力广告不等于特定服务器已经接受相同收发规则。
+
+> TODO（后续版本可选补齐调查）：Windows 6.85 的发送版本选择，以及 Direct version 2 的完整互操作范围；目标部署未进入 Direct，两项均不属于当前版本实践范围。
 
 `packet length` 必须等于当前 UDP 载荷减去 8 字节 UDP 头。`total length` 覆盖全部片段重组后的完整 DES-CBC 密文。
 
 ## ID 分配与重发
 
-Linux 1.31 的 `CDirTranThread` 构造时把两个独立计数器初始化为 `1`：
+Linux 1.31、macOS 1.35 与 Windows 6.85 的新 Direct 发送上下文均以 `1` 初始化两个独立计数器：
 
-- 逻辑消息关联计数器用于头字段 `0x18`。每次创建一条新的 SAM/SMP 逻辑消息时取当前值并递增。
-- 片段计数器用于头字段 `0x02`。每发送一个新片段时递增。
+| 计数器         | 头偏移 | 分配单位              | 分配规则           |
+| -------------- | ------ | --------------------- | ------------------ |
+| correlation ID | `0x18` | 一条 SAM/SMP 逻辑消息 | 先取当前值，再递增 |
+| fragment ID    | `0x02` | 一个新片段            | 先取当前值，再递增 |
 
-同一片段的超时重发保留原 fragment ID、correlation ID、flags、密文、total length、session 参数和端点。一次建立新的 Direct 发送线程后，计数器重新从 `1` 开始。
+同一逻辑消息的全部片段具有相同 correlation ID；下一条逻辑消息取得新值。重建 Direct 发送上下文时，两个计数器重新从 `1` 开始。
 
-原始客户端的 correlation ID 按逻辑消息变化，接收索引不能把它当成整场连接永远不变的 token。实现可以把该字段命名为 `session_id`，但必须明确其实际作用域。
-
-macOS 1.35 的 fragment ID 和 correlation ID 分别位于 `CDirTranThread + 0x688` 和 `+0x6a8`，片段发送和逻辑消息发送路径分别递增。Windows 6.85 的 `CDirTranThread` 构造（`0x4a56d0`）同样把 fragment ID `+0x6c4` 和 correlation ID `+0x14cc` 初始化为 `1`；发送路径都是先取当前值，再递增。
-
-三平台因此在计数语义上一致：新 Direct 发送上下文从 `1` 开始，每个新片段取得新的 fragment ID，每条新逻辑消息取得新的 correlation ID。当前 Zig 原型仍通过固定 `DirectSessionConfig.session_id` 发送所有消息，这是待修正的实现差异，不是未决协议语义。
+同一片段超时重发时，fragment ID、correlation ID、flags、密文、total length、会话参数和端点均不变。Linux 1.31 重发时重新取得 timestamp 并重算 authenticator；Windows 6.85 与 macOS 1.35 使用相同的片段身份语义。
 
 ## 分片标志
 
@@ -177,8 +186,6 @@ SAM 的业务载荷使用单字节 `type` 和单字节 `length`。最小握手�
 
 `01 01 02` 是握手前缀，最后字节 `02` 为握手码。后续字段使用单字节长度 TLV。Linux 1.31 从 DHCP 结果取 `client_ipv4`，从认证适配器取 `client_mac`。两者在 Direct 初始化时确定，不是随机会话参数。
 
-当前 `SamConfig.session_parameter` 和 `endpoint_parameter` 是早期占位名；协议字段语义已经确认，后续实现应直接命名为 IPv4 和认证网卡 MAC。
-
 ### Client 输入：SAM/SMP 初始身份
 
 | 信息               | 布局                                   |
@@ -206,7 +213,7 @@ client 获取方式：从所选网络接口读取硬件地址，确保它与其�
 
 client 获取方式：从所选系统盘的稳定标识读取。
 
-Linux 1.31 的 `getdiskid` 静态实现已经还原：
+Linux 1.31 的磁盘标识规则为：
 
 1. 读取 `/etc/mtab`，按空格切分，选择以 `/` 开头的设备字段。
 2. 删除设备路径末尾连续十进制数字，例如 `/dev/sda1` 转为 `/dev/sda`。
@@ -216,19 +223,19 @@ Linux 1.31 的 `getdiskid` 静态实现已经还原：
 
 macOS 1.35 不使用该 Linux 路径。它在应用启动时调用 `/usr/sbin/system_profiler` 的 `SPSerialATADataType`，解析 `Serial Number` 字段，删除空格和换行，并同样限制为 64 字节。
 
-Windows 6.85 的 wrapper（`0x4c4680`）只接受磁盘索引 `0..3`。对每个候选索引依次尝试：
+Windows 6.85 的候选磁盘索引为 `0..3`，每个索引依次使用以下设备信息路径：
 
 1. 系统卷或设备信息路径，IOCTL `0x560000`。
 2. `\\.\PhysicalDrive%d`，IOCTL `0x7c088`。
 3. `\\.\Scsi%d` 配合 `SCSIDISK`，IOCTL `0x4d008`。
 
-任一设备信息读取成功后，`0x4c4d10` 从 Identify 串号字段取 10 个 16 位单元，按 SATA/ATA 的字序展开为最多 20 个 ASCII 字节，删除所有 `0x20` 空格。字段 `0x54` 的外层上限仍为 64 字节，因此 Windows 当前实现的有效串号上限是 20 字节。
+任一设备信息读取成功后，从 Identify 串号字段取 10 个 16 位单元，按 SATA/ATA 的字序展开为最多 20 个 ASCII 字节，删除所有 `0x20` 空格。字段 `0x54` 的外层上限仍为 64 字节，因此 Windows 当前实现的有效串号上限是 20 字节。
 
 #### `username_gbk`
 
 用途：作为 SAM/SMP 业务身份，与 EAP 阶段使用的账户对应。
 
-client 获取方式：取得用户账户名，按目标协议字段要求转换为 GBK 字节后传给 rj-connect；原客户端的长度上限仍需按部署 profile 校验。
+client 获取方式：取得用户账户名，转换为 GBK 字节；有效长度受对应 TLV 及部署 profile 约束。
 
 SAM 用户信息消息以 `01 01 08` 开头，随后使用 TLV：
 
@@ -268,9 +275,7 @@ SMP direct payload 以 4 字节固定头开始：
 | `0x2d`  | user info   | 用户名和地址信息                 |
 | `0x2e`  | DHCP result | `0xce` 成功标志，`0xcf` 消息     |
 
-SMP 的 `0x03` 与 SAM 的 `0x04` 不同：Linux 1.31 从 `tagSmpParaDir.HDSerialNO` 读取硬盘序列号。现有 Zig 公共类型中的 `session_parameter` 是旧占位名，不能据此推断字段来源。
-
-`SmpConfig.session_parameter` 的协议语义已经确认是主机硬盘序列号；后续实现应移除该占位名。
+SMP hello 的 `0x03` 为硬盘序列号；SAM 握手的 `0x04` 为本机 IPv4 地址。两者语义不同。
 
 SMP user info 的核心地址字段为：
 
@@ -286,7 +291,72 @@ SMP user info 的核心地址字段为：
 
 DHCP result 的 `0xce` 长度固定为 1。`0xcf` 为 GBK 文本，可以为空。
 
-> TODO（后续版本可选补齐调查）：SAM/SMP 的 ACL、密码修改、主机信息和服务切换等辅助业务消息。
+### SMP 命令分派
+
+Linux 1.31 的 SMP 消息以固定头 `01 00 01` 起始，第 4 字节确定命令：
+
+| Command       | 处理             | 当前构建的行为                                   |
+| ------------- | ---------------- | ------------------------------------------------ |
+| `0x01`        | 初始化数据       | TLS 内层 TLV `0x0b` 承载服务器初始化 XML         |
+| `0x02`        | 通知与 URL       | 解析内层通知文本与 URL TLV，并投递 UI 消息       |
+| `0x03`        | 下线通知         | 内层 TLV `0x1f` 为原因文本，触发本地 logoff      |
+| `0x04`        | 重认证           | Linux 1.31 不执行动作；macOS 1.35 转入重认证入口 |
+| `0x05`        | 主机检查状态请求 | Linux/macOS 不解析载荷                           |
+| `0x06`        | 主机信息请求     | Linux/macOS 不解析载荷                           |
+| `0x07`        | 强制下线         | 内层 TLV `0x47` 为原因文本，并模拟用户下线       |
+| `0x08`-`0x0a` | 无动作           | 接受但不解释                                     |
+| `0x2a`        | 修改口令结果     | 修改口令结果                                     |
+| `0x2e`        | DHCP 认证结果    | DHCP 第二认证结果                                |
+
+Linux 1.31 与 macOS 1.35 不解析 ACL 载荷，SMP 命令分派中没有 ACL 分支。Windows 6.85 将 ACL 通知转交 UI 或平台组件。Linux 的主机检查状态默认为否；可明确的认证检查结果通过字段 `0x62` 表达。
+
+> TODO（后续版本可选补齐调查）：SMP ACL 与主机信息尚无已明确的通用 TLV 格式。
+
+### SMP 密码修改
+
+Linux 1.31 的客户端改密请求使用固定头 `01 00 01 2b`，其后为
+`code:u8 || length:u16be || value`：
+
+| Code   | 值              |
+| ------ | --------------- |
+| `0x02` | 用户名 GBK 字节 |
+| `0x03` | 硬盘序列号      |
+| `0xc1` | 旧口令原始字节  |
+| `0xc0` | 新口令原始字节  |
+
+口令 TLV 不附加 NUL。客户端使用 300 字节总缓冲；所有 TLV 和固定头装入后不得超过该上限。服务器结果
+命令为 `0x2a`，载荷仍使用同一 TLV 编码：
+
+| Code   | 值                                              |
+| ------ | ----------------------------------------------- |
+| `0xc1` | 长度必须为 `1`；值为 `0` 表示成功，非零表示失败 |
+| `0xc2` | GBK 结果文本，可为空                            |
+
+成功时客户端把待提交的新口令切换为当前口令并结束等待；失败时显示服务端文本。是否开放改密由 SMP
+初始化 XML 的 `psw_security_detect` 配置控制，其中包括 `self_service`、`is_modify`、
+`modify_at_once`、`force_offline`、`offline_wait_time`、`fail_code` 和 `modify_message`。这些字段只控制
+本地 UI、超时和强制下线，不是 EAP 认证凭据的一部分。
+
+### SAM 服务切换
+
+服务列表来自服务器字段 `0x66`，以 `@` 分隔。客户端选择其中一个名称后：
+
+- Ruijie NAS 路径不发送服务切换业务帧，只把新服务名保存为当前选择，并投递内部认证重启消息；
+- 其他 SAM 路径发送以 `01 01 06` 开始的 SAM 载荷，随后使用单字节 TLV：
+
+| Code   | 值                  |
+| ------ | ------------------- |
+| `0x03` | 用户名 GBK 字节     |
+| `0x04` | 本机 IPv4 地址      |
+| `0x10` | 一字节 DHCP 标志    |
+| `0x05` | 认证网卡 MAC        |
+| `0x09` | 目标服务名 GBK 字节 |
+
+载荷总长上限为 300 字节。服务器在 SAM 外层 TLV `0x07`、subtype `0x0a` 返回结果文本；客户端展示
+文本，并在文本精确等于“切换成功!”时把新服务名写入配置、清除待切换状态。SMP 分派中没有对应的
+服务切换请求或结果命令，不能把 SAM `0x07/0x0a` 套用到 SMP。
+
+> TODO （后续版本可选实施）：SMP 改密、SAM 服务切换及辅助通知消息。用户选择、旧/新口令与主机标识属于第 2 类 client 输入。
 
 SMP hello 连续失败 3 次时，会话返回重连流程。持续失败最终进入 held 或 logoff，不得在旧 key 上继续发送心跳。
 
@@ -305,18 +375,14 @@ Linux 1.31 在服务器未提供 Direct 端点参数时使用：
 | 对端 Direct 端口 | `8080`     | `0x5a`         |
 | 本地 Direct 端口 | `80`       | `0x6e`         |
 
-SMP 路径还会对本地端口创建 UDP bind；确定性库本身只生成完整帧，监听、绑定或等价过滤由 client adapter 负责。
+SMP 路径使用该本地端口绑定 UDP 接收端点。
 
-> 当前 Zig 代码暂不实施：UDP socket 创建、绑定和收包。client 提交完整 Ethernet 帧。
-
-服务器 UTC 字段 `0x5e` 非零时，发送时间戳使用服务器时间锚点。缺失或为零时，Linux 1.31 使用本地单调发送序列；该状态的记录从零开始，`GetNextTimeStampForSend` 返回下一个值，因此已有记录上的首个发送值为 `1`。
+服务器 UTC 字段 `0x5e` 非零时，发送时间戳使用服务器时间锚点。缺失或为零时，Linux 1.31 使用本地单调发送序列；记录从零开始，每次发送取下一个值，因此已有记录上的首个发送值为 `1`。
 
 Linux 1.31 和 macOS 1.35 的 Direct fragment/correlation 计数器都从 `1` 开始。macOS 1.35 与 Windows 6.85 的 Direct 参数构造都设置对端端口 `8080`、本地端口 `80`；Windows 还设置片段 ACK 等待 `3000 ms` 和三次发送尝试。
 
-Windows 6.85 的 `CDirTranThread` 构造先把时间戳管理器指针 `+0x14c8` 清零；Direct 初始化随后调用 `0x55f640` 创建管理器，其时间戳表初始为空。取下一发送时间戳的路径（`0x5635e0`）按目标键查找记录；记录不存在时返回 `0`，存在时把记录中的 64 位值加一并返回。因此 Windows 的全新发送上下文在时间戳表仍为空时，首个发送时间戳是 `0`，不是 Linux 路径的 `1`。服务器时间或对端记录的写入会改变后续值。
+Windows 6.85 的 Direct 时间戳表初始为空，以对端 IP/端口为键。记录不存在时，下一发送时间戳为 `0`；记录存在时，将其中的 64 位值加一。服务器响应建立记录后，后续值从 `1` 开始递增。服务器时间或对端记录的写入会改变后续值；重建上下文恢复空表状态。
 
-当前 rj-connect 要求 client 在无服务器 UTC 时显式提供单调起点；`local_udp_port = 20000` 则是当前库的原型默认策略，不是 Linux 1.31 客户端默认值。
+macOS 1.35 的一个 EAP-MD5 会话由服务器将端口覆盖为对端 `53`、本地 `138`，其已知交换中不含 Direct 报文。目标部署的三轮采集共 9 次认证均未出现 SAM/SMP 帧。该会话的 EAP 成功不构成时间戳、计数器、重发或心跳行为的适用证明。
 
-协议默认值已经明确：Linux、macOS 和 Windows 样本都使用对端 `8080`、本地 `80`；服务器字段 `0x5a`、`0x6e` 覆盖回退值。rj-connect 应把端口、时间戳策略和计数器生命周期收口到内部具名 Direct profile，不应继续要求 client 解释这些协议语义。
-
-> 运行调查（认证后 Direct）：保持认证成功后的当前连接，记录实际首发送时间戳、后续记录建立时点、fragment/correlation 递增和重发复用、UDP 端点与端口回退、缺失 `0x61` 时的 SAM/SMP 选择、心跳/重认证/重连时间线，以及同一 Windows 会话不同消息的 `0x4d`/`0x60`。静态代码已给出候选机制，但这些结论依赖真实会话状态和 socket 行为，不能用离线编码结果替代。
+> TODO（后续版本可选补齐调查）：具体部署的 Direct 启动条件、首发送时间戳、心跳与重认证时序，以及重发行为的互操作范围；目标部署在多轮认证中均未产生 SAM/SMP 帧，不属于当前版本实践范围。
