@@ -2,6 +2,12 @@
 
 ## v0.1.1
 
+### 6c93756
+
+- 冷启动失败场景补充：`Failure` 终端帧可携带 6 字节或 34 字节私有 data；第一次失败由系统 `eapolclient` 对 MD5-Challenge 返回 NAK 引起，不作为目标应用的失败语义。
+- 目的 MAC 分派：目标应用首次 Start 发往内嵌锐捷地址，收到服务器帧后的 Identity/MD5-Response/Logoff 发往服务器源 MAC；标准组播只出现在系统 `eapolclient` 的裸帧。
+- 报告同步 Failure data 布局和目的 MAC 行为，并缩减待动态调查项。
+
 ### 3ec8eae
 
 - 增加 2026-10-25 冷启动采集结论：challenge 前 `0x2f` 为固定初始值、失败重试后重复，`0x4d` 为 128 个零字节，私有尾块按当前状态构造而非复用上一帧缓冲。
