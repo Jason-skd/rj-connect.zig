@@ -111,10 +111,16 @@ gateway = c0000201
 dns = cb007135
 ```
 
-编码结果：
+编码结果（写入尾块前的 23 字节）：
 
 ```text
 00001311 01 c000020a ffffff00 c0000201 cb007135 90ee
+```
+
+该块在 EAP-MD5 尾块中逐字节执行 `on_wire = bit_reverse8(decoded ^ 0xff)`，线上结果为：
+
+```text
+ffff37777ffcffbfaf000000fffcffbf7f2cff7153f688
 ```
 
 前 21 字节参与 CRC，末两字节为大端校验和。

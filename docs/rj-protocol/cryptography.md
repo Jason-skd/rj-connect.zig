@@ -49,6 +49,12 @@ ci = Pi XOR mi
 
 PEAP 固定起始值长度为 16，不带 NUL。
 
+EAP-MD5 路径在 challenge 之前不重新计算口令链：目标客户端在 Start/Identity 帧中沿用上一次 MD5-Response 的密文，收到新 challenge 后才重算。冷启动且进程内从未计算过口令链时的取值尚未采集。
+
+> TODO（当前版本待动态调查）：冷启动时 EAP-MD5 口令密文 `0x2f` 的取值。
+>
+> TODO（待 client 上线联调）：服务器是否校验 challenge 前帧中的 `0x2f`；将其置零或省略是否仍可通过认证。
+
 ## V3 材料
 
 | 信息           | 布局                         |
@@ -93,6 +99,8 @@ Windows 6.85 的 EAP-MD5 与 PEAP 使用进程状态派生的 V3 材料：
 该结果随进程运行状态变化，不属于固定文件或固定数组摘要。Linux/macOS 的 `A`、`D` 材料模型不适用于 Windows 6.85。
 
 目标 macOS 1.35 部署的两份认证期采集提供 7 个 `(challenge, 0x4d)` 对，覆盖 mode `0`、`2`、`3` 和 `4`（未出现 mode `1`）。以 macOS 内嵌的 1820/2035 字节 `A`/`D` 材料按本页五模式构造复算，7 个结果与运行时 `0x4d` 文本逐字节一致；两次采集各有一个成功会话，其响应获得 Success。该部署的 mode 选择与固定材料关系因此已由运行值验证；Windows 的进程派生材料结构仍单独成立。
+
+`0x4d` 在 challenge 之前固定为 128 个零字节；收到 challenge 后才按上表选择 mode 并生成摘要。目标部署的 Start 与 challenge 前 Identity 帧都使用全零值。
 
 > TODO（后续版本可选补齐调查）：Windows 6.85 的运行进程状态到 V3 材料与摘要的完整派生关系需要目标 Windows 运行时抓包，不属于当前版本实践范围；Linux 1.31 与 macOS 1.35 的固定材料构造已按运行值验证。
 

@@ -87,7 +87,7 @@ acquired 阶段发送 Identity Response。收到 MD5-Challenge Request 时，客
 
 只有网络完成动作成功后才进入 authenticated。EAP Success 本身不证明客户端已经获得可用地址。
 
-标准 EAP Success 只有 code、identifier 和 length，没有 EAP type/data。锐捷扩展可以在 EAPOL 帧后附加私有字段，形成独立于标准 EAP Success 的服务器参数集合。Success code 是进入网络完成和 Direct 初始化的触发器，不代表 Direct 端点、key、IV 或服务类型都编码在 Success 的 `code=3` 中。
+标准 EAP Success 只有 code、identifier 和 length，没有 EAP type；但锐捷扩展可以在 Success 的 EAP length 内附加私有固定段（见[锐捷私有字段](private-fields.md#服务器固定段)），因此 Success 的 length 可以大于 4。客户端必须按完整 EAP length 接收 Success，不能把它当成只有 4 字节的终端。Success code 是进入网络完成和 Direct 初始化的触发器，不代表 Direct 端点、key、IV 或服务类型都编码在 Success 的 `code=3` 中。
 
 Direct 交接至少组合三类输入：
 
@@ -285,9 +285,11 @@ macOS 1.35 使用系统 Security/CoreWLAN provider；Windows 6.85 存在 EAPHost
 
 Direct 参数由服务器参数、DHCP 租约、本机网络信息与客户端身份共同确定。端口回退、时间戳和编号规则见[直接通信](direct.md#端口时间戳与本地回退)；可选身份及主机字段见[私有字段布局](private-fields.md)。
 
-目标 macOS 1.35 部署的 EAP-MD5 交换确认了实际客户端字段集合：`0x17`、`0x18`、`0x2d`、`0x2f`、`0x35`、`0x38`、`0x4e`、`0x36`、`0x4d`、`0x39="students"`、`0x54`、`0x62`、`0x6f`、`0x70`、`0x76`、`0x79`；未发送 `0x55`、`0x64`。这一集合只属于该 EAP-MD5 部署，不能外推到 PEAP 部署的最小字段集合。
+目标 macOS 1.35 部署的 EAP-MD5 交换确认了实际客户端字段集合（按实测尾块顺序）：`0x17`、`0x18`、`0x2d`、`0x2f`、`0x35`、`0x36`、`0x38`、`0x4e`、`0x4d`、`0x39="students"`、`0x54`、`0x76`、`0x62`、`0x70`、`0x6f`、`0x79`；未发送 `0x55`、`0x64`。逐帧差异：`0x4d` 在 challenge 前为 128 个零字节、之后为 V3 摘要；`0x2f` 在 challenge 前沿用上一次结果；`0x62` 在 MD5-Response 为 `1`。这一集合只属于该 EAP-MD5 部署，不能外推到 PEAP 部署的最小字段集合。
 
-> TODO（后续版本可选补齐调查）：各 PEAP 部署要求的客户端名称、版本、IPv6、安全域及其他可选字段的最小集合；目标部署未进入 PEAP，不属于当前版本实践范围。
+> TODO（当前版本待动态调查）：冷启动时 `0x2f`、`0x62` 与 IPv6 槽的取值，以及 Start/Identity 尾块是否重新构造。
+>
+> TODO（待 client 上线联调）：目标字段集合能否裁剪、属性顺序是否影响接受，以及各 PEAP 部署要求的最小集合；目标部署未进入 PEAP，PEAP 最小集合不属于当前版本实践范围。
 
 > TODO （后续版本可选实施）：TLS 握手与证书验证，以及 MSCHAPv2 密码学计算与成功认证器校验。
 

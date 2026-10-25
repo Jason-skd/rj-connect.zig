@@ -55,9 +55,7 @@ Linux 1.31、macOS 1.35 与 Windows 6.85 使用本页所述 42 字节布局，�
 
 Linux 与 macOS 的版本选择仍使用同一 42 字节头。尚无已明确的 version 2 专用布局；能力广告不等于特定服务器已经接受相同收发规则。
 
-> TODO（当前版本待调查）：Windows 6.85 的发送版本选择尚未明确。
-
-> TODO（后续版本可选补齐调查）：Direct version 2 的完整互操作范围；目标部署未进入 Direct，不属于当前版本实践范围。
+> TODO（后续版本可选补齐调查）：Windows 6.85 的发送版本选择，以及 Direct version 2 的完整互操作范围；目标部署未进入 Direct，两项均不属于当前版本实践范围。
 
 `packet length` 必须等于当前 UDP 载荷减去 8 字节 UDP 头。`total length` 覆盖全部片段重组后的完整 DES-CBC 密文。
 
