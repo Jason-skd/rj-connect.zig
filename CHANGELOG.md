@@ -163,3 +163,13 @@ mmdc -i docs/rj-protocol/flow_chart.mmd -o docs/rj-protocol/flow_chart.svg --no-
 - V3 的 A/D 材料绑定目标 macOS 1.35 构建；其他构建、Windows 进程派生材料与 PEAP 信任链不在当前 profile 内。
 - 离线测试与状态图不构成所有校园网互操作的保证；具体协议未知项保留在报告原定义位置。
 - 报告中当前版本的剩余未知项按验证路径标记：“当前版本待动态调查”可由锐捷客户端采集或调试回答；“待 client 上线联调”需要我方实现与真实服务器交互，不能由观察锐捷客户端单独关闭。
+
+## feat/legacy-eap-md5-profile
+
+### Unreleased
+
+- 新增公开 `Session.initLegacy`：MentoHUST 0.3.1 有线 EAP-MD5 profile 使用标准 `MD5(id || password || challenge)` proof、16 字节原始摘要和固定 1000 字节帧；Start 使用标准组播地址，后续响应使用服务器源 MAC。
+- legacy profile 的私有兼容尾部按 `mh031_tail_prefix.bin` 的固定 110 字节前缀加零填充构造；该材料由两次独立实机成功交换验证，只代表已观测的 MentoHUST 0.3.1 行为，不外推为通用 EAP-MD5 规则。
+- 新增 `protocol.eapol.encodeStandardMd5ResponseData`，与锐捷私有用户名摘要分支分开。
+- terminal Success/Failure 的 identifier 不匹配改报 `StaleTerminalIdentifier`，不再与普通 request 的 `StaleIdentifier` 混淆。
+- 当前公开 API 仍以 macOS `Input/Outcome` 为共同 facade；legacy 不接受 `.facts`，传入时报 `UnsupportedProfileInput`。

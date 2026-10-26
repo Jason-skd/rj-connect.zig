@@ -10,9 +10,9 @@ RJ Connect 是一个研究 Ruijie（锐捷）校园网认证协议的技术性�
 
 核心成果是[锐捷校园网认证协议研究报告](docs/rj-protocol/index.md)。报告按报文、私有字段、认证状态、直接通信和密码学组织定义、研究结论与固定向量，独立于 Zig 实例及其工程实施。协议研究结论及其适用边界以报告为准，协议信息的分类与放置规则见[协议文档管理原则](docs/rj-protocol/scope.md)，里程碑与验收目标见 [ROADMAP.md](ROADMAP.md)。
 
-`src/` 中的 Zig 代码提供对研究成果的一次实例复刻：公开 `Session` 实现目标 macOS 1.35 有线 EAP-MD5 profile，包括标准 MD5 证明、566 字节私有尾块、V3 摘要、口令链与 Success/Failure 私有通知。PEAP、Direct、SAM/SMP 与旧私有分支保留为 `src/research/` 内部研究模块，不属于公开接口。网络 I/O、时钟、随机数、TLS、证书验证、MSCHAPv2 计算和系统适配由 client 提供。
+`src/` 中的 Zig 代码提供对研究成果的一次实例复刻：公开 `Session` 支持两个具名有线 EAP-MD5 profile。`Session.init` 实现 macOS 1.35 profile，包括标准 MD5 证明、566 字节私有尾块、V3 摘要、口令链与 Success/Failure 私有通知；`Session.initLegacy` 实现 MentoHUST 0.3.1 profile，使用标准 16 字节 proof、固定 1000 字节帧和已观测的兼容尾部。PEAP、Direct、SAM/SMP 与 `Session.initLegacy` 未覆盖的旧私有分支保留为 `src/research/` 内部研究模块，不属于公开接口。网络 I/O、时钟、随机数、TLS、证书验证、MSCHAPv2 计算和系统适配由 client 提供。
 
-当前发布版本为 `v0.1.1`。公开 interface 只接受目标 profile 的运行事实与凭据；rj-connect 负责协议语义、字段构造、编号生成、状态转移和校验。client 如何取得或组织这些值不属于本库 interface 的约束，交付边界见 ROADMAP。
+当前开发版本在 `v0.1.1` 的 macOS profile 之外增加 MentoHUST 兼容 profile。client 显式选择 profile；每个 profile 只接受其已证明来源和生命周期的输入，rj-connect 负责协议语义、字段构造、编号生成、状态转移和校验。client 如何取得或组织这些值不属于本库 interface 的约束，交付边界见 ROADMAP。
 
 ## 快速开始
 
@@ -42,7 +42,7 @@ var outcome = try session.step(now, .start);
 defer outcome.deinit(allocator);
 ```
 
-`protocol` 提供无会话生命周期的通用 codec 与密码学原语，`session` 提供目标 profile 的 `Session` 生命周期入口。配置、动作所有权、事件和已知限制见 [v0.1.1 使用说明](CHANGELOG.md#v011)。
+`protocol` 提供无会话生命周期的通用 codec 与密码学原语，`session` 提供具名 profile 的生命周期入口。macOS profile 使用 `Session.init`；MentoHUST 0.3.1 profile 使用 `Session.initLegacy`，其配置只需源 MAC 和凭据。配置、动作所有权、事件和已知限制见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 开发验证
 

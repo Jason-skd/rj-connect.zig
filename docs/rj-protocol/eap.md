@@ -186,6 +186,17 @@ name[name_length]
 
 认证核心要求 `value_size=16`。服务器附带的 name 可用于显示或服务选择，但不参与口令摘要。
 
+### MentoHUST 0.3.1 有线兼容 profile
+
+MentoHUST 0.3.1 的有线 EAP-MD5 部署使用标准口令证明，但帧形状与 macOS 1.35 profile 不同。2026-10-26 在 Padavan（Linux 3.4.113，MT7621，eth3）对同一校园网取得两次独立成功交换：
+
+- Start 使用标准目的地址 `01:80:c2:00:00:03`；收到服务器帧后，Identity、MD5-Response 与 Logoff 使用服务器源 MAC。
+- Start、Identity、MD5-Response 与 Logoff 的完整 Ethernet 帧均为 1000 字节。
+- 用户名长度为 11 时，MD5-Response 的 EAP length 为 `33`：5 字节 EAP 头/type、1 字节 `value_size=16`、16 字节原始摘要和 11 字节用户名。data 中的 proof 为 `MD5(identifier || password_bytes || challenge)`。
+- 声明长度之外存在固定兼容尾部：前 110 字节在不同帧、不同交换中逐字节相同，之后补零至 1000 字节。该 110 字节中包含固定前缀、`0x17` 属性和 `0x18` 属性开头，具体字节见[私有字段](private-fields.md#mentohust-031-固定兼容尾部)。该尾部是 MentoHUST 0.3.1 的已观测兼容材料，不是所有锐捷 EAP-MD5 部署的共同要求。
+
+该 profile 的证据范围仅限上述两次成功交换和对应校园网；服务器是否接受省略尾部、其他用户名长度或其他 MentoHUST 构型仍需联调。
+
 ## 标准 EAP-MD5 响应
 
 标准分支遵循常见 802.1X EAP-MD5 语义。客户端用单字节 EAP identifier、口令原始字节和 challenge 计算：
