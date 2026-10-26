@@ -349,3 +349,23 @@ test "challenge chain matches the independent crypto primitive" {
     const len = try crypto.encryptPassword("alice", challenge, "secret", &chain);
     try std.testing.expectEqualSlices(u8, &challenge_chain, chain[0..len]);
 }
+
+test "Failure with a mismatched identifier is a terminal protocol error" {
+    var value = try session.Session.init(std.testing.allocator, config());
+    defer value.deinit();
+
+    var started = try value.step(.fromNanoseconds(0), .start);
+    started.deinit(std.testing.allocator);
+
+    const identity = try serverFrame(std.testing.allocator, .request, 7, .identity, &.{});
+    defer std.testing.allocator.free(identity);
+    var identity_outcome = try value.step(.fromNanoseconds(1), frameInput(&value, identity));
+    identity_outcome.deinit(std.testing.allocator);
+
+    const failure = try serverFrame(std.testing.allocator, .failure, 6, null, &.{});
+    defer std.testing.allocator.free(failure);
+    try std.testing.expectError(
+        error.StaleTerminalIdentifier,
+        value.step(.fromNanoseconds(2), frameInput(&value, failure)),
+    );
+}

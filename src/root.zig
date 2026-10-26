@@ -10,6 +10,7 @@ test {
     _ = protocol;
     _ = session;
     _ = @import("session/target_test.zig");
+    _ = @import("session/legacy_test.zig");
 
     // Research machines for protocol branches outside the target deployment
     // remain compiled and tested, but are not part of the public surface.
@@ -22,4 +23,5 @@ test {
 test "session is exposed from the package root" {
     _ = session.Session;
     _ = session.Generation;
+    _ = session.Session.initLegacy;
 }

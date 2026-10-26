@@ -13,7 +13,7 @@ pub const Generation = struct {
         return self.value == other.value;
     }
 
-    pub fn next(self: Generation) Error!Generation {
+    pub fn next(self: Generation) error{GenerationOverflow}!Generation {
         if (self.value == std.math.maxInt(u32)) return error.GenerationOverflow;
         return .{ .value = self.value + 1 };
     }
@@ -169,6 +169,8 @@ pub const Error = error{
     InvalidState,
     DuplicateFrame,
     StaleIdentifier,
+    StaleTerminalIdentifier,
+    UnsupportedProfileInput,
     TimerNotDue,
     UnsupportedEapMethod,
     StaleGeneration,
