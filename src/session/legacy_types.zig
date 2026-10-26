@@ -29,10 +29,7 @@ pub const Error = error{
     OutOfMemory,
 };
 
-pub const Credentials = struct {
-    username: []const u8,
-    password: []const u8,
-};
+pub const Credentials = shared.Credentials;
 
 pub const Config = struct {
     source_mac: [6]u8,

@@ -52,6 +52,20 @@ pub const Session = struct {
         } };
     }
 
+    pub fn factsSnapshot(self: *const Session) ?Facts {
+        return switch (self.inner) {
+            .macos_1_35_wired => |value| value.facts,
+            .mentohust_0_3_1_wired => null,
+        };
+    }
+
+    pub fn allocationOwner(self: *const Session) std.mem.Allocator {
+        return switch (self.inner) {
+            .macos_1_35_wired => |value| value.allocator,
+            .mentohust_0_3_1_wired => |value| value.allocator,
+        };
+    }
+
     pub fn deinit(self: *Session) void {
         switch (self.inner) {
             .macos_1_35_wired => |*value| value.deinit(),
