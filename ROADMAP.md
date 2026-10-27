@@ -127,14 +127,17 @@
 - [ ] 目标 profile 的兼容假设、证据范围和退出边界明确。
 - [ ] 支持分支通过正常、非法输入、缺失值、超时和错误映射测试。
 
-## Legacy EAP-MD5 profile
+## v0.1.2
 
-- 状态：已实施（待提交）
+### Legacy EAP-MD5 profile
+
+- 状态：已实施（5263654、3220e10）
 - 目标变更：在 macOS profile 之外增加具名 MentoHUST 0.3.1 有线 EAP-MD5 兼容 profile，并区分 terminal identifier 错误。
 
-### 验收
+#### 验收
 
 - [x] legacy Start、Identity、MD5 Response 固定为 1000 字节，proof 为 `value_size=16` 加原始摘要。
 - [x] 两次独立实机成功交换使用相同固定尾部前缀；材料来源与适用边界已记录。
 - [x] Success 进入 authenticated；Failure 进入 held；terminal identifier 不匹配有独立错误身份。
 - [x] macOS profile 原有布局、V3 摘要、口令链和 facts 更新测试保持通过。
+- [x] Padavan eth3 实机使用新 legacy profile 认证成功，2 秒内恢复外网，并完成有界关闭。
