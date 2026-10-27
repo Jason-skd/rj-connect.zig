@@ -448,3 +448,53 @@ fn eapolHeader(packet_type: PacketType, body_len: u16) [header_size]u8 {
         0x88, 0x8e, 0x01, @backingInt(packet_type), @intCast(body_len >> 8), @intCast(body_len),
     };
 }
+
+/// Encodes the RFC 3748 password proof: `MD5(identifier || password || challenge)`.
+pub fn encodeStandardMd5ResponseData(
+    identifier: u8,
+    password: []const u8,
+    challenge: [16]u8,
+    output: []u8,
+) Md5Error![]const u8 {
+    const response_len = 1 + 16;
+    if (output.len < response_len) return error.OutputTooSmall;
+
+    const Md5 = std.crypto.hash.Md5;
+    var hash = Md5.init(.{});
+    hash.update(&.{identifier});
+    hash.update(password);
+    hash.update(&challenge);
+    const digest = hash.finalResult();
+
+    output[0] = 16;
+    @memcpy(output[1..17], &digest);
+    return output[0..response_len];
+}
+
+test "standard EAP-MD5 password proof matches the fixed vector" {
+    const challenge = [16]u8{
+        0, 1, 2,  3,  4,  5,  6,  7,
+        8, 9, 10, 11, 12, 13, 14, 15,
+    };
+    var output: [17]u8 = undefined;
+    const data = try encodeStandardMd5ResponseData(0x17, "secret", challenge, &output);
+    try std.testing.expectEqualSlices(u8, &.{
+        16,
+        0x07,
+        0x91,
+        0xb0,
+        0xbc,
+        0x38,
+        0xfa,
+        0xcd,
+        0x86,
+        0x42,
+        0xac,
+        0x55,
+        0x31,
+        0x91,
+        0x22,
+        0xd6,
+        0xce,
+    }, data);
+}

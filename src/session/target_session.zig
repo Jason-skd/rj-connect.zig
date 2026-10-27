@@ -618,7 +618,7 @@ fn acceptRequestIdentifier(
 
 fn validateTerminalIdentifier(last_response: ?u8, identifier: u8) Error!void {
     if (last_response == null or last_response.? != identifier) {
-        return error.StaleIdentifier;
+        return error.StaleTerminalIdentifier;
     }
 }
 
